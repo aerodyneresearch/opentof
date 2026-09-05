@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opentof"
+version = "0.1.0"
+description = "OpenTof: A package for Time-of-Flight mass spectrometry data analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+
+authors = [
+    { name = "Aerodyne Research, Inc.", email = "info@aerodyne.com" },
+    { name = "Victor Geiser", email = "victor.w.geiser@gmail.com" },
+    { name = "Luping Su", email = "lsu@aerodyne.com" },
+    { name = "Harald Stark", email = "hstark@aerodyne.com" },
+]
+
+license = { file = "LICENSE" }
+keywords = ["mass spectrometry", "time-of-flight", "TOF", "data analysis"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
+
+# Derived from the actual top-level imports in opentof/ (stdlib excluded).
+# Floors are intentionally loose; raise a floor only where you rely on a
+# specific feature/fix in that version.
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "h5py>=3.9",
+    "scikit-learn>=1.3",    # imported as sklearn
+    "dask>=2024.1",
+    "chemparse>=0.3",       # chemical formula parsing
+    "MiniSom>=2.3",         # imported as minisom
+    "tqdm>=4.66",
+    "customtkinter>=5.2",   # GUI component (pulls in Tk)
+    "pyarrow>=14.0",        # runtime engine for pandas .parquet I/O (not imported directly)
+]
+
+[project.urls]
+Homepage = "https://github.com/aerodyneresearch/OpenTof"
+Repository = "https://github.com/aerodyneresearch/OpenTof"
+Issues = "https://github.com/aerodyneresearch/OpenTof/issues"
+
+# Optional extras: install with `pip install opentof[notebook]` or `[dev]`.
+# These were previously in the main dependency list but are tooling, not
+# things opentof imports at runtime.
+[project.optional-dependencies]
+notebook = [
+    "jupyter",
+    "jupyterlab",
+    "notebook",
+    "ipykernel",
+    "ipywidgets",
+]
+dev = [
+    "pytest",
+    "build",
+    "twine",
+]
+
+[tool.setuptools.packages.find]
+include = ["opentof*"]
+
+[tool.setuptools.package-data]
+opentof = ["*.parquet"]
+
+[project.scripts]
+opentof-doit = "opentof.runner:main"

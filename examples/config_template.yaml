@@ -1,0 +1,143 @@
+# ==============================================================================
+# OpenTof DO-IT Processing Configuration Template
+# ==============================================================================
+# Performance Tip:
+# When running via CLI (`opentof-doit`), OpenTof automatically restricts BLAS/MKL
+# thread pools to single-threaded mode to prevent CPU thread-thrashing during
+# fast fitting loops. If you observe Windows E-Core throttling on Intel CPUs,
+# ensure Anaconda Prompt / Terminal is running with high process priority!
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Data Input & Output Directories
+# ------------------------------------------------------------------------------
+data_inputs:
+  directory_path: "./data/h5_files"    # Path to directory containing raw .h5 files
+  pattern: "*.h5"                     # Search pattern for data files
+  chunk_size: 1000                    # Spectra chunk size for memory management
+
+data_outputs:
+  plot_dir: "./output/plots"
+  export_csv_path: "./output/processed_timeseries.csv"
+  save_plots: true
+  show_plot_flag: false        # Default: False (prevents popup windows)
+  
+  # Optional: Save complete OpenTof state file for rapid loading later
+  # export_ot_h5_path: "./output/deployment_state.h5"
+
+# ------------------------------------------------------------------------------
+# Core Workflow Hyper-Parameters
+# ------------------------------------------------------------------------------
+workflow_settings:
+  
+  # 1. Mass Calibration
+  mass_calibration:
+    averaging_interval: 300           # Time window in seconds for interval averaging
+    auto_reject: true                # Automatically identify and reject poor calibrants
+    auto_reject_threshold: 25.0       # Max 90th percentile error in ppm before auto-reject
+    second_pass_custom_shape: true    # Re-run calibration using custom peak shape
+    second_pass_auto_reject_threshold: 10.0
+    # show_plot_flag: false   # Optional per-function override
+
+    # --- ADVANCED MASS CALIBRATION OPTIONS ---
+    # interval_auto_reject: true      # Filter localized transient outliers within single intervals
+    # interval_auto_reject_threshold: 100.0
+    # interval_max_rejects: 5
+    # supersaturated_calibrants: true # Filter dense calibrant lists down to stable peaks per window
+    # mz_protection_window: 5.0
+    # mz_anchor: true                 # Prevent large m/z gaps by restoring best candidate
+    # mz_anchor_spacing: 25.0
+
+  # 2. Reference Spectrum
+  reference_spectrum:
+    reference_peak_mass: "C3H6OH+"   # Formula string or float m/z for reference peak
+    window_seconds: 600               # Window size in seconds for evaluation
+    plt_y_max: 10
+    # show_plot_flag: false
+
+  # 3. Baseline Determination
+  baseline:
+    plt_y_max: 10
+    # window_size: 60                 # Optional explicit window size (defaults to 0.1% of axis length)
+    # show_plot_flag: false
+
+  # 4. Peak Width Function
+  peak_width:
+    mode: "ransac"                    # Fitting mode: "ransac" or "standard"
+    # show_plot_flag: false
+
+  # 5. Empirical Peak Shape
+  peak_shape:
+    tail_intensity_cutoff: 0.03
+    omega_r: 0.75
+    omega_l: 0.65
+    # show_plot_flag: false
+
+  # 6. Peak List & Fitting
+  peak_fitting:
+    fitting_mode: "constrained"       # Options: "constrained" or "unconstrained"
+    peak_type: "custom"               # Options: "custom", "pseudo_voigt", "gaussian", "lorentzian"
+    peak_list:
+      - "CH4SH+"                      # Methanethiol
+      - "C2H3NH+"                     # Acetonitrile
+      - "C3H6OH+"                     # Acetone
+      - "C4H8OH+"                     # MEK
+      - "C6H12H+"                     # Hexene-1
+      - "C6H6+"                       # Benzene (Charge Transfer)
+      - "C6H7+"                       # Benzene (Protonated)
+      - "C7H8H+"                      # Toluene
+      - "C8H10H+"                     # m-Xylene
+      - "C9H12H+"                     # 1,2,4-TMB
+
+  # 7. Quantification & Background Subtraction
+  quantification:
+    zero_flow: 250                    # Flow rate during auto-zero periods (sccm)
+    cal_flow: 5                       # Flow rate during sensitivity cal challenges (sccm)
+    interp_mode: "interp"             # Options: "interp" (linear) or "median" (global)
+    default_tank_conc: 1000.0         # Default concentration in ppb if unlisted below
+
+    # Cylinder Concentrations (ppb) for Target Compounds
+    calibration_tank_concentrations:
+      C2H4OH+: 1060.0
+      C4H6H+: 1070.0
+      CH4SH+: 1060.0
+      C2H3NH+: 1060.0
+      C3H6OH+: 1080.0
+      C4H8OH+: 1060.0
+      C6H12H+: 1070.0
+      C6H6+: 1080.0
+      C6H7+: 1080.0
+      C7H8H+: 1080.0
+      C8H10H+: 1090.0
+      C9H12H+: 1080.0
+
+# ------------------------------------------------------------------------------
+# Mass Calibration Targets List
+# ------------------------------------------------------------------------------
+calibrants:
+  - "NO+"
+  - "O2+"
+  - "(H2O)2H+"
+  - "CH4OH+"
+  - "C2H3NH+"
+  - "C2H4OH+"
+  - "C3H5+"
+  - "NO2+"
+  - "CH4SH+"
+  - "(H2O)3H+"
+  - "C3H6OH+"
+  - "C6H6O3H+"
+  - "C3H7O2+"
+  - "C2H5O2+"
+  - "C5H8H+"
+  - "C6H6+"
+  - "C6H6H+"
+  - "C7H8H+"
+  - "C5H6H+"
+  - "C8H10H+"
+  - "C9H12H+"
+  - "C7H7ClH+"
+  - "C6H18Si3O3H+"
+  - "C8H25Si4O4H+"
+  - "C8H25O4Si4+"
+  - "C10H31O5Si5+"

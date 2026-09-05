@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use OpenTof in your work, please cite it using the metadata below."
+title: "OpenTof: A package for Time-of-Flight mass spectrometry data analysis"
+abstract: "OpenTof is a Python package for analyzing Time-of-Flight (TOF) mass spectrometry data."
+type: software
+version: "0.1.0"
+# date-released: 2026-01-01   # uncomment and set to the actual release date
+# doi: 10.5281/zenodo.XXXXXXX  # uncomment and set once a Zenodo DOI is minted
+url: "https://github.com/aerodyneresearch/OpenTof"
+repository-code: "https://github.com/aerodyneresearch/OpenTof"
+license: Apache-2.0
+keywords:
+  - mass spectrometry
+  - time-of-flight
+  - TOF
+  - data analysis
+authors:
+  - name: "Aerodyne Research, Inc."
+    website: "https://www.aerodyne.com"
+  - family-names: Geiser
+    given-names: Victor
+  - family-names: Su
+    given-names: Luping
+    email: lsu@aerodyne.com
+    affiliation: "Aerodyne Research, Inc."
+  - family-names: Stark
+    given-names: Harald
+    email: hstark@aerodyne.com
+    affiliation: "Aerodyne Research, Inc."

@@ -1,0 +1,54 @@
+name: Publish to TestPyPI
+
+# Test-release workflow: builds the package and publishes it to TestPyPI
+# via Trusted Publishing (OIDC) — no API token or password required.
+#
+# Tag-driven only: publishing happens when you push a tag matching
+# release_testv* (e.g. release_testv0.1.0). The distinctive prefix makes
+# a release a deliberate act — an ordinary vX.Y.Z tag will NOT trigger it.
+# Mirrors the real PyPI workflow's release_v* scheme, and matches the
+# release_testv* tag restriction set on the "testpypi" GitHub environment.
+
+on:
+  push:
+    tags:
+      - "release_testv*"
+
+jobs:
+  build-and-publish:
+    name: Build and publish to TestPyPI
+    runs-on: ubuntu-latest
+
+    # Must match the "Environment name" you set on the TestPyPI pending
+    # publisher (testpypi). Create it under repo Settings -> Environments.
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/opentof/
+
+    permissions:
+      # Required to clone the repo. Specifying any permission sets all
+      # unlisted ones to "none", so a private repo needs this explicitly or
+      # checkout fails with "repository not found".
+      contents: read
+      # Required for Trusted Publishing — lets GitHub mint the OIDC token.
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build
+
+      - name: Build source distribution and wheel
+        run: python -m build
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
