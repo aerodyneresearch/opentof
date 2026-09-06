@@ -6,8 +6,8 @@ type: software
 version: "0.1.0"
 # date-released: 2026-01-01   # uncomment and set to the actual release date
 # doi: 10.5281/zenodo.XXXXXXX  # uncomment and set once a Zenodo DOI is minted
-url: "https://github.com/aerodyneresearch/OpenTof"
-repository-code: "https://github.com/aerodyneresearch/OpenTof"
+url: "https://github.com/aerodyneresearch/opentof"
+repository-code: "https://github.com/aerodyneresearch/opentof"
 license: Apache-2.0
 keywords:
   - mass spectrometry

@@ -2,9 +2,9 @@
 
 A Python library for end-to-end processing of Time-of-Flight Mass Spectrometry (ToF-MS) data from Tofwerk instruments (`.h5` files).
 
-## Installation (once public)
+## Installation
 
-Once the package is published, you can install OpenTof and all its dependencies directly via `pip`:
+Install OpenTof and all its dependencies directly via `pip`:
 
 ```bash
 pip install opentof
@@ -15,8 +15,8 @@ If you previously used the old script setup, your environment is still completel
 
 ### Step 0: Clone the Repository
 ```bash
-git clone https://github.com/aerodyneresearch/OpenTof.git 
-cd OpenTof
+git clone https://github.com/aerodyneresearch/opentof.git 
+cd opentof
 ```
 
 ### Step 1: Create and Activate your environment
