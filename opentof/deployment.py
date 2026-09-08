@@ -14,6 +14,7 @@ import json
 from scipy.interpolate import interp1d
 import inspect
 import warnings
+from typing import Self # Or use 'Deployment' as a string if using older Python
 
 
 class Deployment:
@@ -89,10 +90,14 @@ class Deployment:
         Time-aligned DataFrame storing extracted compound timeseries profiles.
     nm_data : dict
         Dictionary storing extracted intensity, derivative, and axis segments by nominal mass.
+    diagnostic_fits : dict
+        Dictionary storing information collected from running diagnostic nominal mass fitters
     peak_list : dict or None
         Target compound dictionary containing lists of formulas, center masses, and FWHM bounds.
     isotopes : dict or None
         Theoretical isotopic distributions calculated for all formulas in `peak_list`.
+    apd_df : pandas.DataFrame
+        Dataframe containing results from running automated_peak_discovery
     peak_assignment_db : pandas.DataFrame
         Reference formula lookup database loaded from packaged compound tables.
         Populated with formulas from the PubChem database
@@ -160,6 +165,9 @@ class Deployment:
         # Dictionary container for user-extracted nominal mass segments
         self.nm_data = {}
 
+        # Container for stored diagnostic fitting results
+        self.diagnostic_fits = {}
+
         # Target peak list dictionary and pre-calculated isotope patterns
         self.peak_list = None
         self.isotopes = None
@@ -225,7 +233,7 @@ class Deployment:
     @classmethod
     def from_directory(cls, directory, pattern="*.h5", chunk_size=1000, 
                        segment_profiles=None, reagent_ion=None,
-                       plot_dir=None):
+                       plot_dir=None)-> Deployment:
         """
         Construct a Deployment object from a chronological sequence of .h5 files in a directory.
 
@@ -379,7 +387,7 @@ class Deployment:
 
     @classmethod
     def single_file(cls, filepath, chunk_size=1000, segment_profiles=None, 
-                    reagent_ion=None, plot_dir=None):
+                    reagent_ion=None, plot_dir=None) -> Deployment:
         """
         Construct a Deployment object from a single raw .h5 file.
 
@@ -454,7 +462,7 @@ class Deployment:
         return obj
 
     @classmethod
-    def from_ot_h5(cls, filepath):
+    def from_ot_h5(cls, filepath) -> Deployment:
         """
         Construct a complete Deployment instance directly from an OpenTof state file (.h5).
 
@@ -1409,12 +1417,9 @@ class Deployment:
     # ------------------------
     # Wrapper Functions
     # ------------------------
-    # ------------------------
-    # Wrapper Functions
-    # ------------------------
     def mass_calibration(self, calibrants=None, averaging_interval=300, plot_flag=True, 
                          show_plot_flag=True, overwrite_calibration=True, recompute_gad=False, 
-                         output_dir=None, plot_subdir=None, **kwargs):
+                         output_dir=None, plot_subdir=None, **kwargs) -> Deployment:
         """
         Execute or reconstruct mass calibration across the deployment time-series.
 
@@ -1605,6 +1610,7 @@ class Deployment:
             self.mde_median_spline, self.mde_tde_splines = mass_dependent_error_plot(
                 results, 
                 output_dir=output_dir,
+                show_plot_flag=show_plot_flag,
             )
 
         # Store results dictionary on object instance
@@ -1619,7 +1625,7 @@ class Deployment:
         return self
 
     def determine_reference_spectrum(self, output_dir=None, plot_subdir=None, 
-                                     plot_flag=True, show_plot_flag=True, **kwargs):
+                                     plot_flag=True, show_plot_flag=True, **kwargs) -> Deployment:
         """
         Calculate the global reference spectrum and positional mass offsets across time.
 
@@ -1715,7 +1721,8 @@ class Deployment:
 
     
     def determine_baseline(self, target_spectrum=None, plot_flag=True, 
-                           output_dir=None, plot_subdir=None, show_plot_flag=True, **kwargs):
+                           output_dir=None, plot_subdir=None, show_plot_flag=True, 
+                           **kwargs) -> Deployment:
         """
         Calculate the baseline and global noise level for a spectrum.
 
@@ -1810,7 +1817,7 @@ class Deployment:
     
     def determine_peak_width(self, plot_flag=True, mode='ransac', 
                              output_dir=None, plot_subdir=None, 
-                             show_plot_flag=True, **kwargs):
+                             show_plot_flag=True, **kwargs) -> Deployment:
         """
         Fit peak width (FWHM) resolution functions across the mass spectrum.
 
@@ -1915,7 +1922,7 @@ class Deployment:
 
     def determine_peak_shape(self, plot_flag=True, output_dir=None, 
                              plot_subdir=None, show_plot_flag=True,
-                             **kwargs):
+                             **kwargs) -> Deployment:
         """
         Extract the empirical instrument peak line shape from the reference spectrum.
 
@@ -1991,7 +1998,7 @@ class Deployment:
         # Return self instance to enable method chaining
         return self
     
-    def populate_peak_list_and_isotopes(self, peak_list, **kwargs):
+    def populate_peak_list_and_isotopes(self, peak_list, **kwargs) -> Deployment:
         """
         Populate the target peak list dictionary and pre-calculate theoretical isotopic distributions.
 
@@ -2097,7 +2104,8 @@ class Deployment:
     def FFI_unconstrained(self, peak_type='gaussian', 
                           noise_level=None, 
                           noise_std_mult=10.0,
-                          verbose=True, tol=1e-4, **kwargs):
+                          use_diagnostic_overrides=True,
+                          verbose=True, tol=1e-4, **kwargs) -> Deployment:
         """
         Execute parallel unconstrained peak fitting and integration across all dataset spectra.
 
@@ -2159,6 +2167,19 @@ class Deployment:
                                  "Call `determine_peak_shape()` first.")
             custom_shape = self.custom_peak_shape
 
+        # Check diagnostic overrides to update target peak list centers or initial guesses
+        active_peaks = list(self.peak_list['peaks'])
+        if use_diagnostic_overrides and hasattr(self, 'diagnostic_fits'):
+            for key, diag_res in self.diagnostic_fits.items():
+                if key.startswith("unconstrained_") and 'peaks' in diag_res:
+                    for p in diag_res['peaks']:
+                        if p['name'] not in active_peaks and not p['name'].startswith("Peak_"):
+                            active_peaks.append(p['name'])
+            
+            # Synchronize peak list if custom peaks were added during diagnostic testing
+            if len(active_peaks) != len(self.peak_list['peaks']):
+                self.populate_peak_list_and_isotopes(active_peaks)
+
         # Execute out-of-core parallel unconstrained peak fitting driver
         result_df = full_fitting_integration_unconstrained(
             peak_list=self.peak_list['peaks'],
@@ -2187,7 +2208,7 @@ class Deployment:
         return self
     
     # TODO: progress bar is nonlinear!!
-    def FFI_constrained(self, peak_type='gaussian', verbose=True, **kwargs):
+    def FFI_constrained(self, peak_type='gaussian', verbose=True, **kwargs) -> Deployment:
         """
         Execute parallel fully constrained peak fitting and integration across all dataset spectra.
 
@@ -2268,7 +2289,8 @@ class Deployment:
         # Return self instance to enable method chaining
         return self
     
-    def generate_averaged_dataset(self, averaging_interval=300, recalculate=False, **kwargs):
+    def generate_averaged_dataset(self, averaging_interval=300, 
+                                  recalculate=False, **kwargs) -> Deployment:
         """
         Generate and cache the Global Averaged Dataset (GAD) across time intervals.
 
@@ -2424,69 +2446,141 @@ class Deployment:
         plt.show()
 
 
-    def plot_nnls_fit_w_isotopes(self, ms_i, nm, peak_type='custom', **kwargs):
+    def fit_nm_constrained(self, nominal_mass, ms_i=None, initial_masses=None, 
+                           peak_type='custom', target_spectrum=None, 
+                           target_mass_axis=None, target_baseline=None,
+                           nm_search_range=0.5, subtract_isotopes=True,
+                           plot_flag=True, show_plot_flag=True, save_plot_flag=False, 
+                           output_dir=None, plot_filename=None, **kwargs):
         """
-        Diagnostic two-panel plot inspecting secondary isotope subtraction and NNLS peak fitting.
+        Perform diagnostic constrained (Non-Negative Least Squares) peak fitting on a sliced nominal mass segment.
 
-        Extracts the baseline-subtracted mass spectrum at writebuf index `ms_i`, reconstructs 
-        secondary isotopic signal generated by lower-mass parent peaks, subtracts isotopic 
-        interferences, and fits Non-Negative Least Squares (NNLS) peak amplitudes across 
-        the target nominal mass window (m/z ~NM +- 0.5).
+        Slices a target nominal mass window (:math:`m/z ~NM +- nm_search_range}`) from a target spectrum,
+        reconstructs and subtracts secondary isotopic interference signals on the fly, resolves target peak centers and widths 
+        from `self.peak_list` (or accepts custom `initial_masses`), and solves for peak height amplitudes using Non-Negative 
+        Least Squares (NNLS).
 
         Parameters
         ----------
-        ms_i : int
-            0-based spectrum index along the time-series axis to inspect.
-        nm : int or float
-            Target nominal mass (m/z) to inspect.
+        nominal_mass : int or float
+            Target nominal mass integer or center value (:math:`m/z`) to inspect.
+        ms_i : int or None, default=None
+            0-based writebuf/spectrum index along the dataset time-series axis to inspect. If ``None``, defaults to `target_spectrum` or `self.reference['reference_spectrum']`.
+        initial_masses : sequence of (str or float) or None, default=None
+            Sequence of chemical formula strings or exact numeric $m/z$ values to constrain. If ``None``, resolves targets from `self.peak_list`.
         peak_type : {'custom', 'pseudo_voigt', 'gaussian', 'lorentzian'}, default='custom'
-            Peak shape model used to construct basis function matrices.
+            Model line shape identifier passed to the basis matrix generator.
+        target_spectrum : numpy.ndarray or None, default=None
+            1D array of spectral intensity values to evaluate. Defaults to `self.reference['reference_spectrum']` if ``None``.
+        target_mass_axis : numpy.ndarray or None, default=None
+            1D array of calibrated mass-to-charge ($m/z$) coordinates matching `target_spectrum`. Defaults to reference or first-guess mass axis if ``None``.
+        target_baseline : numpy.ndarray or None, default=None
+            1D array representing baseline continuum intensity to subtract from `target_spectrum`. Defaults to `self.baseline['adjusted_baseline']`.
+        nm_search_range : float, default=0.5
+            Half-width search window size in $m/z$ units ($[NM - Δ, NM + Δ]$).
+        subtract_isotopes : bool, default=True
+            If ``True``, reconstructs and subtracts secondary isotopic signals originating from lower-mass parent peaks prior to fitting.
+        plot_flag : bool, default=True
+            If ``True``, renders a 2-panel diagnostic figure displaying the spectral fit and residual error.
+        show_plot_flag : bool, default=True
+            If ``True``, displays generated diagnostic plots interactively.
+        save_plot_flag : bool, default=False
+            If ``True``, exports generated diagnostic figures to disk.
+        output_dir : str or pathlib.Path or None, default=None
+            Directory path to save exported plot figures. Defaults to `self.plot_dir` or default plot directory if ``None``.
+        plot_filename : str or None, default=None
+            Filename for saved diagnostic plot images. Defaults to ``constrained_fit_nm<NM>.png`` if ``None``.
         **kwargs : dict
-            Additional keyword arguments (e.g., `nm_search_range`, `custom_shape`).
+            Additional keyword arguments passed to internal solvers or shape selectors.
 
         Returns
         -------
-        heights : numpy.ndarray
-            1D array of fitted NNLS peak height amplitudes for target compounds within the nominal mass window.
-
-        Panel 1
-            Raw intensity spectrum overlaid with reconstructed secondary isotopic background.
-        Panel 2
-            Isotope-subtracted spectrum overlaid with component NNLS peak fits.
+        result : dict or None
+            A diagnostic results dictionary stored on the instance at `self.diagnostic_fits['constrained_<NM>']`:
+                * ``'nominal_mass'`` : Sliced nominal mass center value.
+                * ``'mz_segment'`` : 1D array of mass coordinates in the sliced window.
+                * ``'int_segment'`` : 1D array of baseline-subtracted intensities.
+                * ``'total_fit'`` : 1D array of cumulative fitted model intensity.
+                * ``'peaks'`` : List of dictionaries containing individual fitted peak parameters.
+                * ``'fit_params'`` : 1D array of optimized NNLS peak height amplitudes.
         """
         from scipy.optimize import nnls
         from opentof.mass_calibration import get_mass_axis_for_ms_i
-        from opentof.peak_fitting import peak_function_selector
-        from opentof.utils import return_mass
+        from opentof.peak_fitting import peak_function_selector, fit_unconstrained_peaks
+        from opentof.utils import return_mass, get_nm_segment_data, ensure_dir, get_default_plot_dir
         from opentof.isotopes import isotope_signal_on_axis
 
-        # --- Step 1: Fetch Spectral Slice & Mass Axis ---
-        spectra = self.tofdata_subtracted[ms_i, :]
-        if hasattr(spectra, 'compute'):
-            spectra = spectra.compute()
-        spectra_mass_axis = get_mass_axis_for_ms_i(ms_i, self.calibration, self.sample_index_axis)
+        # --- STEP 1: RESOLVE TARGET SPECTRUM & MASS AXIS ---
+        # Case A: Inspect a specific spectrum index (ms_i) along the dataset time-series
+        if ms_i is not None:
+            spectra = self.tofdata_subtracted[ms_i, :] if getattr(self, 'tofdata_subtracted', None) is not None else self.tofdata[ms_i, :]
+            if hasattr(spectra, 'compute'):
+                spectra = spectra.compute()
+            spectra_mass_axis = get_mass_axis_for_ms_i(ms_i, self.calibration, self.sample_index_axis)
 
-        # --- Step 2: Select Line Shape Model Function ---
-        custom_shape = kwargs.get('custom_shape', getattr(self, 'custom_peak_shape', None))
-        peak_func = peak_function_selector(peak_type, custom_shape=custom_shape)
+        # Case B: Default to the global reference spectrum if target_spectrum is omitted
+        elif target_spectrum is None:
+            if getattr(self, 'reference', None) is None:
+                raise ValueError("Deployment.reference is not populated. Call `define_reference_spectrum()` first or pass `target_spectrum` / `ms_i`.")
+            spectra = self.reference['reference_spectrum']
+            spectra_mass_axis = self.reference['rs_mass_axis']
+            if target_baseline is None and getattr(self, 'baseline', None) is not None:
+                spectra = spectra - self.baseline['adjusted_baseline']
 
-        # --- Step 3: Reconstruct Secondary Isotopic Signal from Lower Mass Parents ---
-        try:
-            fitted_row = self.peak_data.loc[self.peak_data['MS_index'] == ms_i].iloc[0]
-        except IndexError:
-            print(f"MS Index {ms_i} not found in peak_data.")
-            return
+        # Case C: Use user-provided target_spectrum and first-guess mass axis fallback
+        elif target_mass_axis is None:
+            spectra_mass_axis = self.first_guess_mass_axis
 
+        # Subtract baseline if explicitly supplied alongside custom target_spectrum
+        if target_baseline is not None and ms_i is None:
+            spectra = spectra - target_baseline
+
+        # --- STEP 2: ON-THE-FLY SECONDARY ISOTOPE RECONSTRUCTION & SUBTRACTION ---
         total_isotope_signal = np.zeros_like(spectra_mass_axis)
-        
-        # Accumulate secondary isotope profiles for all fitted parents with mass < target NM
-        for peak in self.peak_list['peaks']:
-            c_mass = return_mass(peak) if isinstance(peak, str) else float(peak)
-            if int(np.round(c_mass)) < nm:
-                amp_col = f"{peak}_amplitude"
-                if amp_col in fitted_row and not pd.isna(fitted_row[amp_col]):
-                    parent_amp = fitted_row[amp_col]
-                    if parent_amp > 0:
+        custom_shape = kwargs.get('custom_shape', getattr(self, 'custom_peak_shape', None))
+
+        if subtract_isotopes and getattr(self, 'peak_list', None) is not None:
+            for peak in self.peak_list['peaks']:
+                c_mass = return_mass(peak)
+                
+                # Evaluate lower-mass parent peaks capable of generating isotopic overlap in the target window
+                if c_mass is not None and int(np.round(c_mass)) < nominal_mass:
+                    parent_amp = 0.0
+
+                    # 1. Attempt to retrieve pre-fitted parent peak amplitude from peak_data if ms_i is provided
+                    if ms_i is not None and getattr(self, 'peak_data', None) is not None:
+                        try:
+                            fitted_row = self.peak_data.loc[self.peak_data['MS_index'] == ms_i].iloc[0]
+                            amp_col = f"{peak}_amplitude"
+                            if amp_col in fitted_row and not pd.isna(fitted_row[amp_col]):
+                                parent_amp = fitted_row[amp_col]
+                        except (IndexError, AttributeError):
+                            parent_amp = 0.0
+
+                    # 2. Fallback: Fit parent peak on the fly directly from target_spectrum
+                    if parent_amp <= 0:
+                        fwhm_g = self.peak_width_function(c_mass) if getattr(self, 'peak_width_function', None) else 0.03
+                        p_mask = (spectra_mass_axis >= c_mass - fwhm_g * 2.0) & (spectra_mass_axis <= c_mass + fwhm_g * 2.0)
+                        
+                        if np.any(p_mask):
+                            p_mz = spectra_mass_axis[p_mask]
+                            p_sig = spectra[p_mask]
+                            
+                            if np.max(p_sig) > 0:
+                                try:
+                                    p_popt = fit_unconstrained_peaks(
+                                        x_axis=p_mz, signal=p_sig,
+                                        centers_guess=[c_mass], fwhms_guess=[fwhm_g],
+                                        amplitudes_guess=[np.max(p_sig)],
+                                        peak_type=peak_type, custom_shape=custom_shape,
+                                        center_wiggle=0.1
+                                    )
+                                    parent_amp = max(0.0, p_popt[0])
+                                except Exception:
+                                    parent_amp = max(0.0, np.max(p_sig))
+
+                    # Reconstruct continuous line shape profile for secondary isotopic variants
+                    if parent_amp > 0 and isinstance(peak, str):
                         iso_sig = isotope_signal_on_axis(
                             formula=peak,
                             mass_axis=spectra_mass_axis,
@@ -2497,32 +2591,38 @@ class Deployment:
                         )
                         total_isotope_signal += iso_sig
 
-        # --- Step 4: Perform Secondary Isotope Subtraction ---
-        subtracted_spectra = spectra - total_isotope_signal
-        subtracted_spectra = np.maximum(subtracted_spectra, 0)  # Enforce non-negative intensity bound
+        # Subtract isotopic interference background and enforce non-negative floor
+        subtracted_spectra = np.maximum(spectra - total_isotope_signal, 0)
 
-        # --- Step 5: Slice Target Nominal Mass Window & Build NNLS Basis Matrix ---
-        nm_search_range = kwargs.get('nm_search_range', 0.5)
-        mask = (spectra_mass_axis >= (nm - nm_search_range)) & (spectra_mass_axis <= (nm + nm_search_range))
-        
-        mz_segment = spectra_mass_axis[mask]
-        int_segment_raw = spectra[mask]
-        int_segment_sub = subtracted_spectra[mask]
-        isotope_signal_segment = total_isotope_signal[mask]
+        # --- STEP 3: SLICE NOMINAL MASS WINDOW ---
+        int_segment, mz_segment, _ = get_nm_segment_data(
+            nominal_mass, subtracted_spectra, spectra_mass_axis, self.tof_axis, nm_search_range=nm_search_range
+        )
 
-        # Isolate target peaks falling inside the nominal mass search window
+        # --- STEP 4: RESOLVE CANDIDATE TARGET PEAKS ---
+        peak_func = peak_function_selector(peak_type, custom_shape=custom_shape)
+
         target_peaks = []
-        for peak in self.peak_list['peaks']:
-            c_mass = return_mass(peak) if isinstance(peak, str) else float(peak)
-            if (nm - nm_search_range) <= c_mass <= (nm + nm_search_range):
-                fwhm = self.peak_width_function(c_mass)
+        if initial_masses is not None:
+            for item in initial_masses:
+                c_mass = return_mass(item)
+                fwhm = self.peak_width_function(c_mass) if getattr(self, 'peak_width_function', None) else 0.03
                 if peak_type == 'custom' and hasattr(peak_func, 'gauss_to_ps'):
                     fwhm *= peak_func.gauss_to_ps
-                target_peaks.append({'name': peak, 'mass': c_mass, 'fwhm': fwhm})
+                target_peaks.append({'name': str(item), 'mass': c_mass, 'fwhm': fwhm})
+        elif getattr(self, 'peak_list', None) is not None:
+            for peak in self.peak_list['peaks']:
+                c_mass = return_mass(peak)
+                if c_mass is not None and (nominal_mass - nm_search_range) <= c_mass <= (nominal_mass + nm_search_range):
+                    fwhm = self.peak_width_function(c_mass) if getattr(self, 'peak_width_function', None) else 0.03
+                    if peak_type == 'custom' and hasattr(peak_func, 'gauss_to_ps'):
+                        fwhm *= peak_func.gauss_to_ps
+                    target_peaks.append({'name': str(peak), 'mass': c_mass, 'fwhm': fwhm})
 
-        # Solve NNLS regression on isotope-subtracted segment
+        # --- STEP 5: BUILD BASIS MATRIX & SOLVE NNLS CONSTRAINED SYSTEM ---
         heights = []
         total_fit = np.zeros_like(mz_segment)
+        fitted_peaks = []
         if target_peaks:
             M = np.zeros((len(mz_segment), len(target_peaks)))
             for q, p_info in enumerate(target_peaks):
@@ -2531,44 +2631,491 @@ class Deployment:
                 else:
                     M[:, q] = peak_func(mz_segment, 1.0, p_info['mass'], p_info['fwhm'])
             
-            heights, _ = nnls(M, int_segment_sub)
+            # Solve Non-Negative Least Squares (NNLS) for peak heights
+            heights, _ = nnls(M, int_segment)
             total_fit = M @ heights
 
-        # --- Step 6: Two-Panel Figure Visualization ---
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, dpi=150)
-        
-        # Panel 1: Raw Spectrum & Reconstructed Isotope Signal
-        ax1.plot(mz_segment, int_segment_raw, label='Raw Data', color='gray', lw=2, alpha=0.6)
-        ax1.plot(mz_segment, isotope_signal_segment, label='Isotope Signal Reconstruction', color='red', lw=1.5, linestyle=':')
-        ax1.fill_between(mz_segment, 0, isotope_signal_segment, color='red', alpha=0.1)
-        ax1.set_title(f"Raw Data & Isotope Interferences (m/z ~ {nm})")
-        ax1.set_ylabel("Intensity (ions/s)")
-        ax1.grid(True, linestyle=':', alpha=0.6)
-        ax1.legend(loc='upper right', fontsize='small')
+            for q, p_info in enumerate(target_peaks):
+                curve = M[:, q] * heights[q]
+                fitted_peaks.append({
+                    'name': p_info['name'],
+                    'amplitude': heights[q],
+                    'center_mass': p_info['mass'],
+                    'fwhm_mass': p_info['fwhm'],
+                    'curve': curve
+                })
 
-        # Panel 2: Subtracted Spectrum & Component NNLS Peak Fits
-        ax2.plot(mz_segment, int_segment_sub, label='Subtracted Data', color='black', lw=2, alpha=0.6)
-        ax2.plot(mz_segment, total_fit, label='Total NNLS Fit', color='forestgreen', lw=1.5, linestyle='--')
-        
-        for q, p_info in enumerate(target_peaks):
-            peak_component = M[:, q] * heights[q]
-            ax2.plot(mz_segment, peak_component, label=f"{p_info['name']} (H: {heights[q]:.1f})", alpha=0.8)
+        # --- STEP 6: REDESIGNED DIAGNOSTIC VISUALIZATION (3:1 DUAL PANEL) ---
+        if plot_flag:
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, 
+                figsize=(10, 6), 
+                sharex=True, 
+                gridspec_kw={'height_ratios': [3, 1]}, 
+                dpi=150
+            )
 
-        ax2.set_title("NNLS Fit on Isotope-Subtracted Signal")
-        ax2.set_xlabel("m/z")
-        ax2.set_ylabel("Intensity (ions/s)")
-        ax2.grid(True, linestyle=':', alpha=0.6)
-        ax2.legend(loc='upper right', fontsize='small')
+            raw_seg, _, _ = get_nm_segment_data(nominal_mass, spectra, spectra_mass_axis, self.tof_axis, nm_search_range=nm_search_range)
+            iso_seg, _, _ = get_nm_segment_data(nominal_mass, total_isotope_signal, spectra_mass_axis, self.tof_axis, nm_search_range=nm_search_range)
 
-        plt.tight_layout()
-        plt.show()
+            # --- TOP PANEL: Main Spectral Fit & Component Curves ---
+            has_iso = subtract_isotopes and np.any(iso_seg > 0)
+            if has_iso:
+                ax1.plot(mz_segment, raw_seg, label='Raw Signal', color='gray', lw=1.2, alpha=0.5, linestyle=':')
+                ax1.plot(mz_segment, int_segment, label='Target Signal (Deisotoped)', color='black', lw=1.8)
+            else:
+                ax1.plot(mz_segment, int_segment, label='Target Signal', color='black', lw=1.8)
 
-        return heights
+            ax1.plot(mz_segment, total_fit, label='Total NNLS Fit', color='forestgreen', lw=2.0, linestyle='--')
+            
+            cmap = plt.get_cmap('tab10')
+            for q, p_info in enumerate(fitted_peaks):
+                col = cmap(q % 10)
+                ax1.plot(mz_segment, p_info['curve'], color=col, linestyle='-', lw=1.5, alpha=0.8, 
+                         label=f"{p_info['name']} (H: {p_info['amplitude']:.1f})")
+                ax1.axvline(p_info['center_mass'], color=col, linestyle=':', alpha=0.6)
+
+            ax1.set_title(f"Constrained Diagnostic Fit (m/z ~ {nominal_mass})", fontsize=11)
+            ax1.set_ylabel("Intensity (ions/s)")
+            ax1.grid(True, linestyle=':', alpha=0.6)
+            ax1.legend(loc='upper right', fontsize='small')
+
+            # --- BOTTOM PANEL: Fit Residuals & Subtracted Isotope Profile ---
+            residuals = int_segment - total_fit
+            ax2.plot(mz_segment, residuals, color='crimson', lw=1.2, label='Fit Residuals')
+            ax2.axhline(0, color='black', lw=0.8, linestyle='--')
+
+            if has_iso:
+                ax2.plot(mz_segment, iso_seg, color='darkorange', lw=1.5, label='Subtracted Isotope Signal')
+                ax2.fill_between(mz_segment, 0, iso_seg, color='darkorange', alpha=0.2)
+                ax2.set_ylabel("Residuals / Isotopes")
+            else:
+                ax2.set_ylabel("Residual Error")
+
+            ax2.set_xlabel("m/z")
+            ax2.grid(True, linestyle=':', alpha=0.6)
+            ax2.legend(loc='upper right', fontsize='x-small')
+
+            plt.tight_layout()
+
+            if save_plot_flag:
+                if output_dir is None:
+                    output_dir = getattr(self, 'plot_dir', None) or get_default_plot_dir()
+                ensure_dir(output_dir)
+                if plot_filename is None:
+                    plot_filename = f"constrained_fit_nm{nominal_mass}.png"
+                plt.savefig(os.path.join(output_dir, plot_filename), bbox_inches='tight')
+
+            if show_plot_flag:
+                plt.show()
+            plt.close()
+
+        # --- STEP 7: PACKAGE RESULTS & PERSIST TO DEPLOYMENT ---
+        result = {
+            'nominal_mass': nominal_mass,
+            'mz_segment': mz_segment,
+            'int_segment': int_segment,
+            'total_fit': total_fit,
+            'peaks': fitted_peaks,
+            'fit_params': np.array(heights)
+        }
+
+        self.diagnostic_fits[f"constrained_{nominal_mass}"] = result
+        return result
+
+
+    def fit_nm_unconstrained(self, nominal_mass, ms_i=None, initial_masses=None, 
+                             peak_type='custom', target_spectrum=None, 
+                             target_mass_axis=None, target_baseline=None,
+                             nm_search_range=0.5, subtract_isotopes=True,
+                             plot_flag=True, show_plot_flag=True, save_plot_flag=False, 
+                             output_dir=None, plot_filename=None, 
+                             smooth_factor=-1, smooth_function='inverse linear',
+                             noise_level=None, noise_std_mult=10.0,
+                             deriv_threshold=0.0, rel_filter=None, abs_filter=None,
+                             max_peaks=12, tol=1e-8, **kwargs):
+        """
+        Perform diagnostic unconstrained non-linear least squares peak fitting on a sliced nominal mass segment.
+
+        Slices a target nominal mass window (:math:`m/z ~NM +- nm_search_range`) from a target spectrum,
+        reconstructs and subtracts secondary isotopic interference signals on the fly, discovers peak candidate positions via 2nd 
+        derivative curvature analysis (or accepts explicit user mass guesses), and optimizes peak height, center, and width parameters 
+        simultaneously using non-linear least squares.
+
+        Parameters
+        ----------
+        nominal_mass : int or float
+            Target nominal mass integer or center value (:math:`m/z`) to inspect.
+        ms_i : int or None, default=None
+            0-based writebuf/spectrum index along the dataset time-series axis to inspect. If ``None``, defaults to `target_spectrum` or `self.reference['reference_spectrum']`.
+        initial_masses : sequence of (str or float) or None, default=None
+            Sequence of chemical formula strings or exact numeric $m/z$ values to serve as initial center position guesses. If ``None``, peak candidates are discovered automatically.
+        peak_type : {'custom', 'pseudo_voigt', 'gaussian', 'lorentzian'}, default='custom'
+            Model line shape identifier passed to the optimization backend.
+        target_spectrum : numpy.ndarray or None, default=None
+            1D array of spectral intensity values to evaluate. Defaults to `self.reference['reference_spectrum']` if ``None``.
+        target_mass_axis : numpy.ndarray or None, default=None
+            1D array of calibrated mass-to-charge ($m/z$) coordinates matching `target_spectrum`. Defaults to reference or first-guess mass axis if ``None``.
+        target_baseline : numpy.ndarray or None, default=None
+            1D array representing baseline continuum intensity to subtract from `target_spectrum`. Defaults to `self.baseline['adjusted_baseline']`.
+        nm_search_range : float, default=0.5
+            Half-width search window size in $m/z$ units ($[NM - Δ, NM + Δ]$).
+        subtract_isotopes : bool, default=True
+            If ``True``, reconstructs and subtracts secondary isotopic signals originating from lower-mass parent peaks prior to fitting.
+        plot_flag : bool, default=True
+            If ``True``, renders a 2-panel diagnostic figure displaying the spectral fit and residual error.
+        show_plot_flag : bool, default=True
+            If ``True``, displays generated diagnostic plots interactively.
+        save_plot_flag : bool, default=False
+            If ``True``, exports generated diagnostic figures to disk.
+        output_dir : str or pathlib.Path or None, default=None
+            Directory path to save exported plot figures. Defaults to `self.plot_dir` or default plot directory if ``None``.
+        plot_filename : str or None, default=None
+            Filename for saved diagnostic plot images. Defaults to ``unconstrained_fit_nm<NM>.png`` if ``None``.
+        smooth_factor : int, default=-1
+            Window length for Savitzky-Golay derivative filtering. If ``-1``, calculated dynamically from local Signal-to-Noise Ratio (SNR).
+        smooth_function : {'inverse linear', 'logistic', 'hyperbolic decay', 'double logarithmic', 'logarithmic'}, default='inverse linear'
+            Dynamic window selection equation used when `smooth_factor=-1`.
+        noise_level : float or None, default=None
+            Background noise standard deviation ($σ$). Estimated automatically from non-peak channels if ``None``.
+        noise_std_mult : float, default=10.0
+            Multiplier applied to `noise_level` to establish the absolute peak detection threshold floor ($N * σ$).
+        deriv_threshold : float, default=0.0
+            Minimum 2nd derivative prominence threshold expressed as a percentage (0–100%) of the maximum observed curvature.
+        rel_filter : float or None, default=None
+            Minimum relative intensity threshold in [0.0, 1.0] required to qualify candidate peaks.
+        abs_filter : float or None, default=None
+            Minimum absolute intensity threshold (ions/s) required to qualify candidate peaks.
+        max_peaks : int, default=12
+            Maximum number of candidate peaks allowed per nominal mass window to prevent solver overload.
+        tol : float, default=1e-8
+            Convergence tolerance passed to the Trust Region Reflective (TRF) non-linear solver.
+        **kwargs : dict
+            Additional keyword arguments passed to :func:`fit_unconstrained_peaks`.
+
+        Returns
+        -------
+        result : dict or None
+            A diagnostic results dictionary stored on the instance at `self.diagnostic_fits['unconstrained_<NM>']`:
+                * ``'nominal_mass'`` : Sliced nominal mass center value.
+                * ``'mz_segment'`` : 1D array of mass coordinates in the sliced window.
+                * ``'int_segment'`` : 1D array of baseline-subtracted intensities.
+                * ``'total_fit'`` : 1D array of cumulative fitted model intensity.
+                * ``'peaks'`` : List of dictionaries containing individual fitted peak parameters.
+                * ``'fit_params'`` : Raw 1D parameter vector returned by the optimization solver.
+            Returns ``None`` if no spectral channels or valid peak candidates are identified in the segment.
+        """
+        from scipy.signal import find_peaks, savgol_filter
+        from opentof.utils import get_nm_segment_data, ensure_dir, get_default_plot_dir, return_mass
+        from opentof.peak_fitting import fit_unconstrained_peaks, peak_function_selector, calculate_detection_threshold
+        from opentof.mass_calibration import get_mass_axis_for_ms_i
+        from opentof.isotopes import isotope_signal_on_axis
+
+        # --- STEP 1: RESOLVE TARGET SPECTRUM & MASS AXIS ---
+        # Case A: Inspect a specific spectrum index (ms_i) along the dataset time-series
+        if ms_i is not None:
+            target_spectrum = self.tofdata_subtracted[ms_i, :] if getattr(self, 'tofdata_subtracted', None) is not None else self.tofdata[ms_i, :]
+            if hasattr(target_spectrum, 'compute'):
+                target_spectrum = target_spectrum.compute()
+            target_mass_axis = get_mass_axis_for_ms_i(ms_i, self.calibration, self.sample_index_axis)
+
+        # Case B: Default to the global reference spectrum if target_spectrum is omitted
+        elif target_spectrum is None:
+            if getattr(self, 'reference', None) is None:
+                raise ValueError("Deployment.reference is not populated. Call `define_reference_spectrum()` first or pass `target_spectrum` / `ms_i`.")
+            target_spectrum = self.reference['reference_spectrum']
+            target_mass_axis = self.reference['rs_mass_axis']
+            if target_baseline is None and getattr(self, 'baseline', None) is not None:
+                target_spectrum = target_spectrum - self.baseline['adjusted_baseline']
+
+        # Case C: Use user-provided target_spectrum and first-guess mass axis fallback
+        elif target_mass_axis is None:
+            target_mass_axis = self.first_guess_mass_axis
+
+        # Subtract baseline if explicitly supplied alongside custom target_spectrum
+        if target_baseline is not None and ms_i is None:
+            target_spectrum = target_spectrum - target_baseline
+
+        # --- STEP 2: ON-THE-FLY SECONDARY ISOTOPE RECONSTRUCTION & SUBTRACTION ---
+        total_isotope_signal = np.zeros_like(target_mass_axis)
+        custom_shape = kwargs.get('custom_shape', getattr(self, 'custom_peak_shape', None))
+
+        if subtract_isotopes and getattr(self, 'peak_list', None) is not None:
+            for peak in self.peak_list['peaks']:
+                c_mass = return_mass(peak)
+                
+                # Evaluate lower-mass parent peaks capable of generating isotopic overlap in the target window
+                if c_mass is not None and int(np.round(c_mass)) < nominal_mass:
+                    parent_amp = 0.0
+
+                    # 1. Attempt to retrieve pre-fitted parent peak amplitude from peak_data if ms_i is provided
+                    if ms_i is not None and getattr(self, 'peak_data', None) is not None:
+                        try:
+                            fitted_row = self.peak_data.loc[self.peak_data['MS_index'] == ms_i].iloc[0]
+                            amp_col = f"{peak}_amplitude"
+                            if amp_col in fitted_row and not pd.isna(fitted_row[amp_col]):
+                                parent_amp = fitted_row[amp_col]
+                        except (IndexError, AttributeError):
+                            parent_amp = 0.0
+
+                    # 2. Fallback: Fit parent peak on the fly directly from target_spectrum
+                    if parent_amp <= 0:
+                        fwhm_g = self.peak_width_function(c_mass) if getattr(self, 'peak_width_function', None) else 0.03
+                        p_mask = (target_mass_axis >= c_mass - fwhm_g * 2.0) & (target_mass_axis <= c_mass + fwhm_g * 2.0)
+                        
+                        if np.any(p_mask):
+                            p_mz = target_mass_axis[p_mask]
+                            p_sig = target_spectrum[p_mask]
+                            
+                            if np.max(p_sig) > 0:
+                                try:
+                                    p_popt = fit_unconstrained_peaks(
+                                        x_axis=p_mz, signal=p_sig,
+                                        centers_guess=[c_mass], fwhms_guess=[fwhm_g],
+                                        amplitudes_guess=[np.max(p_sig)],
+                                        peak_type=peak_type, custom_shape=custom_shape,
+                                        center_wiggle=0.1
+                                    )
+                                    parent_amp = max(0.0, p_popt[0])
+                                except Exception:
+                                    parent_amp = max(0.0, np.max(p_sig))
+
+                    # Reconstruct continuous line shape profile for secondary isotopic variants
+                    if parent_amp > 0 and isinstance(peak, str):
+                        iso_sig = isotope_signal_on_axis(
+                            formula=peak,
+                            mass_axis=target_mass_axis,
+                            parent_amplitude=parent_amp,
+                            peak_width_function=self.peak_width_function,
+                            peak_type=peak_type,
+                            custom_shape=custom_shape
+                        )
+                        total_isotope_signal += iso_sig
+
+        # Subtract isotopic interference background and enforce non-negative floor
+        subtracted_spectrum = np.maximum(target_spectrum - total_isotope_signal, 0)
+
+        # --- STEP 3: SLICE NOMINAL MASS WINDOW ---
+        int_segment, mz_segment, tof_segment = get_nm_segment_data(
+            nominal_mass, subtracted_spectrum, target_mass_axis, self.tof_axis, nm_search_range=nm_search_range
+        )
+
+        if len(int_segment) == 0:
+            print(f"No spectral data found around nominal mass {nominal_mass}.")
+            return None
+
+        # --- STEP 4: NOISE LEVEL & ADAPTIVE SMOOTHING ---
+        noise_dict = calculate_detection_threshold(intensity_axis=int_segment, noise_level=noise_level, noise_std_mult=noise_std_mult)
+
+        # Calculate dynamic Savitzky-Golay filter window size based on SNR if smooth_factor=-1
+        if smooth_factor == -1:
+            snr = noise_dict['snr']
+            smoothing_models = {
+                'logistic': 3 + 8 / (1 + np.exp(snr - 5)),
+                'hyperbolic decay': 3 + 20 / (snr + 1),
+                'double logarithmic': 3 + np.log1p(np.log1p(20 / (snr + 1))),
+                'logarithmic': 9 - 0.5 * np.log1p(snr),
+                'inverse linear': 3 + 8 / (1 + snr)
+            }
+            smf = int(np.clip(smoothing_models.get(smooth_function, 3 + 8 / (1 + snr)), 3, 15))
+            smooth_factor = smf if smf % 2 == 1 else smf + 1
+
+        # Enforce odd integer window bounds within array slicing limits
+        if smooth_factor >= len(int_segment):
+            smooth_factor = max(3, len(int_segment) - (1 if len(int_segment) % 2 == 0 else 2))
+
+        # --- STEP 5: PEAK DISCOVERY & THRESHOLD FILTERING ---
+        if initial_masses is None:
+            # Evaluate 2nd derivative curvature on normalized intensity segment
+            norm_intensity = int_segment / (np.max(int_segment) + 1e-8)
+            deriv = savgol_filter(norm_intensity, window_length=smooth_factor, polyorder=2, deriv=2)
+            neg_deriv = -deriv  # Negate so concave-down peaks become positive maxima
+
+            # Determine spatial separation constraint based on expected peak resolution
+            expected_fwhm = self.peak_width_function(nominal_mass) if getattr(self, 'peak_width_function', None) else 0.03
+            mz_step = np.mean(np.diff(mz_segment)) if len(mz_segment) > 1 else 0.001
+            min_index_separation = max(1, int(np.ceil((expected_fwhm * 0.5) / mz_step)))
+
+            raw_candidate_idxs, _ = find_peaks(neg_deriv, distance=min_index_separation)
+
+            if len(raw_candidate_idxs) == 0:
+                print(f"No peak candidates found in 2nd derivative for m/z ~ {nominal_mass}.")
+                return None
+
+            candidate_idxs = np.array(raw_candidate_idxs)
+            mask = np.ones_like(candidate_idxs, dtype=bool)
+
+            # Apply noise detection threshold gate
+            mask &= int_segment[candidate_idxs] >= noise_dict['detection_threshold']
+
+            # Apply relative and absolute intensity threshold filters
+            if abs_filter is not None:
+                mask &= int_segment[candidate_idxs] >= abs_filter
+            if rel_filter is not None:
+                mask &= norm_intensity[candidate_idxs] >= rel_filter
+
+            # Filter candidates by 2nd derivative prominence percentage
+            if deriv_threshold > 0.0 and len(candidate_idxs) > 0:
+                max_deriv_val = np.max(neg_deriv[candidate_idxs])
+                mask &= neg_deriv[candidate_idxs] >= (deriv_threshold / 100.0) * max_deriv_val
+
+            valid_peaks = candidate_idxs[mask]
+
+            if len(valid_peaks) == 0:
+                print(f"No peak candidates survived noise thresholding ({noise_std_mult}σ) at m/z ~ {nominal_mass}.")
+                return None
+
+            # Sort candidate peaks by intensity descending and cap total candidates
+            sorted_peaks = valid_peaks[np.argsort(int_segment[valid_peaks])[::-1]]
+            if max_peaks is not None:
+                sorted_peaks = sorted_peaks[:max_peaks]
+
+            initial_masses = [mz_segment[ind] for ind in np.sort(sorted_peaks)]
+
+        # --- STEP 6: FORMULATE INITIAL GUESSES & UNCONSTRAINED FIT ---
+        c_guess = []
+        for m in initial_masses:
+            if isinstance(m, str) and getattr(self, 'peak_list', None) and self.peak_list and 'peaks' in self.peak_list and m in self.peak_list['peaks']:
+                idx = self.peak_list['peaks'].index(m)
+                c_guess.append(float(self.peak_list['centers'][idx]))
+            else:
+                c_guess.append(float(return_mass(m)))
+
+        f_guess = [float(self.peak_width_function(m)) if getattr(self, 'peak_width_function', None) else 0.03 for m in c_guess]
+        a_guess = [max(float(np.interp(m, mz_segment, int_segment)), 1e-3) for m in c_guess]
+
+        if peak_type == 'custom' and custom_shape is None:
+            peak_type = 'gaussian'
+
+        peak_func = peak_function_selector(peak_type, custom_shape=custom_shape)
+
+        # Solve non-linear least squares optimization using TRF algorithm
+        fit_params = fit_unconstrained_peaks(
+            x_axis=mz_segment,
+            signal=int_segment,
+            centers_guess=c_guess,
+            fwhms_guess=f_guess,
+            amplitudes_guess=a_guess,
+            peak_type=peak_type,
+            custom_shape=custom_shape,
+            tol=tol,
+            **kwargs
+        )
+
+        # --- STEP 7: UNPACK FITTED PARAMETERS & RECONSTRUCT CURVES ---
+        is_pv = (peak_type == 'pseudo_voigt')
+        n_p = 4 if is_pv else 3
+        num_fitted_peaks = len(fit_params) // n_p
+
+        fitted_peaks = []
+        total_fit = np.zeros_like(mz_segment, dtype=float)
+
+        for i in range(num_fitted_peaks):
+            p_i = fit_params[i * n_p : (i + 1) * n_p]
+            amp, center, fwhm = p_i[0], p_i[1], p_i[2]
+            
+            curve = peak_func(mz_segment, *p_i)
+            total_fit += curve
+
+            peak_info = {
+                'name': str(initial_masses[i]) if i < len(initial_masses) else f"Peak_{i+1}",
+                'peak_index': i + 1,
+                'amplitude': amp,
+                'center_mass': center,
+                'fwhm_mass': fwhm,
+                'params': p_i,
+                'curve': curve
+            }
+            if is_pv:
+                peak_info['mixing'] = p_i[3]
+
+            fitted_peaks.append(peak_info)
+
+        # --- STEP 8: REDESIGNED DIAGNOSTIC VISUALIZATION (3:1 DUAL PANEL) ---
+        if plot_flag:
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, 
+                figsize=(10, 6), 
+                sharex=True, 
+                gridspec_kw={'height_ratios': [3, 1]}, 
+                dpi=150
+            )
+
+            raw_seg, _, _ = get_nm_segment_data(nominal_mass, target_spectrum, target_mass_axis, self.tof_axis, nm_search_range=nm_search_range)
+            iso_seg, _, _ = get_nm_segment_data(nominal_mass, total_isotope_signal, target_mass_axis, self.tof_axis, nm_search_range=nm_search_range)
+
+            # --- TOP PANEL: Main Spectral Fit & Component Curves ---
+            has_iso = subtract_isotopes and np.any(iso_seg > 0)
+            if has_iso:
+                ax1.plot(mz_segment, raw_seg, label='Raw Signal', color='gray', lw=1.2, alpha=0.5, linestyle=':')
+                ax1.plot(mz_segment, int_segment, label='Target Signal (Deisotoped)', color='black', lw=1.8)
+            else:
+                ax1.plot(mz_segment, int_segment, label='Target Signal', color='black', lw=1.8)
+
+            ax1.plot(mz_segment, total_fit, color="forestgreen", lw=2.0, linestyle="--", label="Total Fit")
+
+            cmap = plt.get_cmap('tab10')
+            for i, p_info in enumerate(fitted_peaks):
+                col = cmap(i % 10)
+                ax1.plot(mz_segment, p_info['curve'], color=col, lw=1.5, alpha=0.8, label=f"{p_info['name']} ({p_info['center_mass']:.4f} m/z)")
+                ax1.axvline(p_info['center_mass'], color=col, linestyle=":", alpha=0.6)
+
+            # Draw detection threshold gatekeeper lines
+            ax1.axhline(noise_dict['detection_threshold'], label=f'Detection Threshold ({noise_std_mult}σ)', linestyle="-.", color='red', alpha=0.3)
+            ax1.axhline(noise_dict['signal_power'], label='Signal Power (p95)', linestyle="-.", color='purple', alpha=0.3)
+
+            ax1.set_title(f"Unconstrained Diagnostic Fit (m/z ~ {nominal_mass})", fontsize=11)
+            ax1.set_ylabel("Intensity (ions/s)")
+            ax1.grid(True, alpha=0.3, linestyle="--")
+            ax1.legend(loc="upper right", fontsize="small")
+
+            # --- BOTTOM PANEL: Fit Residuals & Subtracted Isotope Profile ---
+            residuals = int_segment - total_fit
+            ax2.plot(mz_segment, residuals, color='crimson', lw=1.2, label='Fit Residuals')
+            ax2.axhline(0, color='black', lw=0.8, linestyle='--')
+
+            if has_iso:
+                ax2.plot(mz_segment, iso_seg, color='darkorange', lw=1.5, label='Subtracted Isotope Signal')
+                ax2.fill_between(mz_segment, 0, iso_seg, color='darkorange', alpha=0.2)
+                ax2.set_ylabel("Residuals / Isotopes")
+            else:
+                ax2.set_ylabel("Residual Error")
+
+            ax2.set_xlabel("m/z")
+            ax2.grid(True, linestyle=':', alpha=0.6)
+            ax2.legend(loc='upper right', fontsize='x-small')
+
+            plt.tight_layout()
+
+            if save_plot_flag:
+                if output_dir is None:
+                    output_dir = getattr(self, 'plot_dir', None) or get_default_plot_dir()
+                ensure_dir(output_dir)
+                if plot_filename is None:
+                    plot_filename = f"unconstrained_fit_nm{nominal_mass}.png"
+                plt.savefig(os.path.join(output_dir, plot_filename), bbox_inches='tight')
+
+            if show_plot_flag:
+                plt.show()
+            plt.close()
+
+        # --- STEP 9: PACKAGE RESULTS & PERSIST TO DEPLOYMENT ---
+        result = {
+            'nominal_mass': nominal_mass,
+            'mz_segment': mz_segment,
+            'int_segment': int_segment,
+            'total_fit': total_fit,
+            'peaks': fitted_peaks,
+            'fit_params': fit_params
+        }
+
+        self.diagnostic_fits[f"unconstrained_{nominal_mass}"] = result
+        return result
 
     # TODO: Maybe make a function that populates all nominal masses with this/a similar method? 
     # -> This would take a while currently so maybe its best to dissuade users from this
     # but keep the method in case they want to make something custom
-    def populate_nm_data_for(self, nominal_mass, force_non_subtracted=False, **kwargs):
+    def populate_nm_data_for(self, nominal_mass, force_non_subtracted=False, **kwargs) -> Deployment:
         """
         Extract intensity segment data for a specific nominal mass across all spectra.
 
@@ -2644,9 +3191,9 @@ class Deployment:
                                  baseline_subtracted=False, overwrite=False, 
                                  use_averaged_dataset=False, show_plot_flag=False,
                                  save_plot_flag=False, output_dir=None, plot_subdir=None,
-                                 n_jobs=1, **kwargs):
+                                 **kwargs) -> Deployment:
         """
-        Discover peak positions in mass space using multi-overlap peak fitting and DBSCAN clustering.
+        Discover peak positions in mass space using multi-overlap peak fitting.
 
         Identifies candidate peak centers across a single provided spectra or accross the GAD. 
         When processing `use_averaged_dataset=True`, clusters discovered peaks using 
@@ -2847,278 +3394,23 @@ class Deployment:
                 self.populate_peak_list_and_isotopes(consensus_peaks)
                 return self
 
-            return peak_df
+            self.apd_df = peak_df
+            print("Resulting dataframe stored in Deployment.apd_df")
+
+            return self
             
         else:
-            peak_df['is_high_variance'] = False
+            # peak_df['is_high_variance'] = False
             if overwrite:
                 found_masses_list = peak_df['center_mass'].dropna().tolist()
                 self.populate_peak_list_and_isotopes(found_masses_list)
                 return self
 
-            return peak_df
 
-    def fit_nm_unconstrained(self, nominal_mass, initial_masses=None, 
-                             peak_type='custom', target_spectrum=None, 
-                             target_mass_axis=None, target_baseline=None,
-                             nm_search_range=0.5, plot_flag=True, 
-                             show_plot_flag=True, save_plot_flag=False, 
-                             output_dir=None, plot_filename=None, 
-                             smooth_factor=-1, smooth_function='inverse linear',
-                             noise_level=None, noise_std_mult=10,
-                             deriv_threshold=0.0, rel_filter=None, abs_filter=None,
-                             max_peaks=8, tol=1e-8, **kwargs):
-        """
-        Perform unconstrained non-linear peak fitting on a sliced nominal mass segment.
+            self.apd_df = peak_df
+            print("Resulting dataframe stored in Deployment.apd_df")
 
-        Slices a target nominal mass window (m/z ~ NM ± nm_search_range) from target_spectrum,
-        discovers initial peak center candidates using Savitzky-Golay 2nd derivative extrema,
-        applies noise thresholding and spatial separation constraints matching multi_overlap_peak_fit,
-        and solves for unconstrained peak parameters via non-linear least squares optimization.
-        Parameters
-        ----------
-        nominal_mass : int or float
-            Target nominal mass-to-charge (m/z) center.
-        initial_masses : sequence of float or None, default=None
-            Explicit initial center mass guesses (m/z). Discovers peak candidates automatically if ``None``.
-        peak_type : {'custom', 'pseudo_voigt', 'gaussian', 'lorentzian'}, default='custom'
-            Model line shape identifier passed to the fitting backend.
-        target_spectrum : numpy.ndarray or None, default=None
-            1D intensity spectrum array to fit. Defaults to `self.reference['reference_spectrum']` if ``None``.
-        target_mass_axis : numpy.ndarray or None, default=None
-            1D mass axis array matching `target_spectrum`. Defaults to reference mass axis if ``None``.
-        target_baseline : numpy.ndarray or None, default=None
-            1D baseline array to subtract from `target_spectrum`. Defaults to `self.baseline['adjusted_baseline']`.
-        nm_search_range : float, default=0.5
-            Mass window half-width (m/z) sliced around `nominal_mass`.
-        plot_flag : bool, default=True
-            If ``True``, renders diagnostic unconstrained fit figures.
-        show_plot_flag : bool, default=True
-            If ``True``, displays generated diagnostic plots interactively.
-        save_plot_flag : bool, default=False
-            If ``True``, exports diagnostic plot figures to disk.
-        output_dir : str or pathlib.Path or None, default=None
-            Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
-        plot_filename : str or None, default=None
-            Filename string for saved plot figures.
-        smooth_factor : int, default=-1
-            Window length for Savitzky-Golay derivative filtering. If ``-1``, calculated dynamically from SNR.
-        smooth_function : str, default='inverse linear'
-            Dynamic window selection model string if `smooth_factor=-1`.
-        noise_level : float or None, default=None
-            Background noise standard deviation (σ). Estimated automatically if ``None``.
-        noise_std_mult : float, default=10.0
-            Signal-to-noise detection threshold multiplier (N * σ).
-        max_peaks : int, default=8
-            Maximum number of candidate peaks allowed per nominal mass window to prevent solver overload.
-        tol : float, default=1e-8
-            Optimization solver convergence tolerance.
-        **kwargs : dict
-            Additional keyword arguments passed to :func:`fit_unconstrained_peaks`.
-
-        Returns
-        -------
-        results : dict or None
-            Dictionary containing fitted segment data and parameter metadata:
-                * ``'nominal_mass'`` : Sliced nominal mass center value.
-                * ``'mz_segment'`` : 1D array of mass coordinates in the sliced window.
-                * ``'int_segment'`` : 1D array of baseline-subtracted intensities.
-                * ``'total_fit'`` : 1D array of cumulative fitted model intensity.
-                * ``'peaks'`` : List of dictionaries containing individual fitted peak parameters.
-                * ``'fit_params'`` : Raw 1D unconstrained parameter vector returned by optimization solver.
-            Returns ``None`` if no spectral data or peak candidates are identified in the segment.
-        """
-        from opentof.utils import get_nm_segment_data, ensure_dir, get_default_plot_dir
-        from opentof.peak_fitting import fit_unconstrained_peaks, peak_function_selector, calculate_detection_threshold
-        from scipy.signal import find_peaks, savgol_filter
-
-        # --- Step 1: Resolve Target Spectrum & Mass Axis ---
-        if target_spectrum is None:
-            if getattr(self, 'reference', None) is None:
-                raise ValueError("Deployment.reference is not populated. Call `define_reference_spectrum()` first or pass `target_spectrum`.")
-            target_spectrum = self.reference['reference_spectrum']
-            target_mass_axis = self.reference['rs_mass_axis']
-        elif target_mass_axis is None:
-            target_mass_axis = self.first_guess_mass_axis
-
-        # Apply baseline subtraction
-        if target_baseline is None:            
-            if getattr(self, 'baseline', None) is None:
-                raise ValueError("Deployment.baseline is not populated. Call `define_baseline()` first or pass `target_baseline`.")
-            target_baseline = self.baseline['adjusted_baseline']
-            target_spectrum = target_spectrum - target_baseline
-        else:
-            target_spectrum = target_spectrum - target_baseline
-
-        # --- Step 2: Slice Nominal Mass Segment Data ---
-        int_segment, mz_segment, tof_segment = get_nm_segment_data(
-            nominal_mass, target_spectrum, target_mass_axis, self.tof_axis, nm_search_range=nm_search_range
-        )
-
-        if len(int_segment) == 0:
-            print(f"No spectral data found around nominal mass {nominal_mass}.")
-            return None
-
-        # --- Step 3: Noise Level & Adaptive Smoothing Determination ---
-        noise_dict = calculate_detection_threshold(intensity_axis=int_segment, noise_level=noise_level, noise_std_mult=noise_std_mult)
-
-        if smooth_factor == -1:
-            snr = noise_dict['snr']
-            smoothing_models = {
-                'logistic': 3 + 8 / (1 + np.exp(snr - 5)),
-                'hyperbolic decay': 3 + 20 / (snr + 1),
-                'double logarithmic': 3 + np.log1p(np.log1p(20 / (snr + 1))),
-                'logarithmic': 9 - 0.5 * np.log1p(snr),
-                'inverse linear': 3 + 8 / (1 + snr)
-            }
-            smf = int(np.clip(smoothing_models.get(smooth_function, 3 + 8 / (1 + snr)), 3, 15))
-            smooth_factor = smf if smf % 2 == 1 else smf + 1
-
-        if smooth_factor >= len(int_segment):
-            smooth_factor = max(3, len(int_segment) - (1 if len(int_segment) % 2 == 0 else 2))
-
-        # --- Step 4: Peak Discovery & Filtering (Matching MOPF Pipeline) ---
-        if initial_masses is None:
-            # 2nd derivative extrema
-            norm_intensity = int_segment / (np.max(int_segment) + 1e-8)
-            deriv = savgol_filter(norm_intensity, window_length=smooth_factor, polyorder=2, deriv=2)
-            neg_deriv = -deriv
-
-            # Spatial separation constraint in bin channels
-            expected_fwhm = self.peak_width_function(nominal_mass) if getattr(self, 'peak_width_function', None) else 0.03
-            mz_step = np.mean(np.diff(mz_segment)) if len(mz_segment) > 1 else 0.001
-            min_index_separation = max(1, int(np.ceil((expected_fwhm * 0.5) / mz_step)))
-
-            raw_candidate_idxs, _ = find_peaks(neg_deriv, distance=min_index_separation)
-
-            if len(raw_candidate_idxs) == 0:
-                print(f"No peak candidates found in 2nd derivative for m/z ~ {nominal_mass}.")
-                return None
-
-            # Multi-threshold candidate mask
-            candidate_idxs = np.array(raw_candidate_idxs)
-            mask = np.ones_like(candidate_idxs, dtype=bool)
-
-            # 1. Enforce Detection limit threshold 
-            mask &= int_segment[candidate_idxs] >= noise_dict['detection_threshold']
-
-            # 2. Absolute and relative intensity thresholds
-            if abs_filter is not None:
-                mask &= int_segment[candidate_idxs] >= abs_filter
-            if rel_filter is not None:
-                mask &= norm_intensity[candidate_idxs] >= rel_filter
-
-            # 3. 2nd derivative prominence percentage
-            if deriv_threshold > 0.0 and len(candidate_idxs) > 0:
-                max_deriv_val = np.max(neg_deriv[candidate_idxs])
-                mask &= neg_deriv[candidate_idxs] >= (deriv_threshold / 100.0) * max_deriv_val
-
-            valid_peaks = candidate_idxs[mask]
-
-            if len(valid_peaks) == 0:
-                print(f"No peak candidates survived noise thresholding ({noise_std_mult}σ) at m/z ~ {nominal_mass}.")
-                return None
-
-            # Sort by intensity descending and cap maximum allowed candidates
-            sorted_peaks = valid_peaks[np.argsort(int_segment[valid_peaks])[::-1]]
-            if max_peaks is not None:
-                sorted_peaks = sorted_peaks[:max_peaks]
-
-            initial_masses = [mz_segment[ind] for ind in np.sort(sorted_peaks)]
-
-        # --- Step 5: Initial Guess Evaluation & Optimization ---
-        c_guess = [float(m) for m in initial_masses]
-        f_guess = [float(self.peak_width_function(m)) if getattr(self, 'peak_width_function', None) else 0.03 for m in c_guess]
-        a_guess = [max(float(np.interp(m, mz_segment, int_segment)), 1e-3) for m in c_guess]
-
-        custom_shape = kwargs.pop('custom_shape', getattr(self, 'custom_peak_shape', None))
-        if peak_type == 'custom' and custom_shape is None:
-            peak_type = 'gaussian'
-
-        peak_func = peak_function_selector(peak_type, custom_shape=custom_shape)
-
-        fit_params = fit_unconstrained_peaks(
-            x_axis=mz_segment,
-            signal=int_segment,
-            centers_guess=c_guess,
-            fwhms_guess=f_guess,
-            amplitudes_guess=a_guess,
-            peak_type=peak_type,
-            custom_shape=custom_shape,
-            tol=tol,
-            **kwargs
-        )
-
-        # --- Step 6: Parameter Unpacking & Curve Reconstruction ---
-        is_pv = (peak_type == 'pseudo_voigt')
-        n_p = 4 if is_pv else 3
-        num_fitted_peaks = len(fit_params) // n_p
-
-        fitted_peaks = []
-        total_fit = np.zeros_like(mz_segment, dtype=float)
-
-        for i in range(num_fitted_peaks):
-            p_i = fit_params[i * n_p : (i + 1) * n_p]
-            amp, center, fwhm = p_i[0], p_i[1], p_i[2]
-            
-            curve = peak_func(mz_segment, *p_i)
-            total_fit += curve
-
-            peak_info = {
-                'peak_index': i + 1,
-                'amplitude': amp,
-                'center_mass': center,
-                'fwhm_mass': fwhm,
-                'params': p_i,
-                'curve': curve
-            }
-            if is_pv:
-                peak_info['mixing'] = p_i[3]
-
-            fitted_peaks.append(peak_info)
-
-        # --- Step 7: Visualization ---
-        if plot_flag:
-            fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
-            ax.plot(mz_segment, int_segment, color="black", lw=1.8, label="Original Signal")
-            ax.plot(mz_segment, total_fit, color="forestgreen", lw=2.0, linestyle="--", label="Total Fit")
-
-            cmap = plt.get_cmap('tab10')
-            for i, p_info in enumerate(fitted_peaks):
-                col = cmap(i % 10)
-                ax.plot(mz_segment, p_info['curve'], color=col, lw=1.5, alpha=0.8, label=f"Peak {i+1} ({p_info['center_mass']:.4f} m/z)")
-                ax.axvline(p_info['center_mass'], color=col, linestyle=":", alpha=0.6)
-
-            # Plot the noise threshold cutoff line
-            ax.axhline(noise_dict['detection_threshold'], label=f'Detection Threshold ({noise_std_mult}σ)', linestyle="-.", color='red', alpha=0.3)
-            ax.axhline(noise_dict['signal_power'], label='Signal Power (p95)', linestyle="-.", color='purple', alpha=0.3)
-
-            ax.set_title(f"Unconstrained Peak Fit (m/z ~ {nominal_mass})", fontsize=12, fontweight='bold')
-            ax.set_xlabel("m/z")
-            ax.set_ylabel("Intensity (ions/s)")
-            ax.grid(True, alpha=0.3, linestyle="--")
-            ax.legend(loc="upper right", fontsize="small")
-
-            if save_plot_flag:
-                if output_dir is None:
-                    output_dir = getattr(self, 'plot_dir', None) or get_default_plot_dir()
-                ensure_dir(output_dir)
-                if plot_filename is None:
-                    plot_filename = f"unconstrained_fit_nm{nominal_mass}.png"
-                plt.savefig(os.path.join(output_dir, plot_filename), bbox_inches='tight')
-
-            if show_plot_flag:
-                plt.show()
-            plt.close()
-
-        return {
-            'nominal_mass': nominal_mass,
-            'mz_segment': mz_segment,
-            'int_segment': int_segment,
-            'total_fit': total_fit,
-            'peaks': fitted_peaks,
-            'fit_params': fit_params
-        }
+            return self
 
     # TODO: Revisit/Restructure old interactive GUI code...
     def launch_wizard(self, spectra=None, spectra_mass_axis=None, 
@@ -3132,10 +3424,13 @@ class Deployment:
 
         if spectra is None:
             if getattr(self, 'reference', None) is None:
-                raise ValueError("Deployment.reference not populated! Either specify a target spectra or call `determine_reference_spectra()` first.")
-            print("Target spectra not provided! Using reference spectra.")
-            spectra = self.reference['reference_spectrum']
-            spectra_mass_axis = self.reference['rs_mass_axis']
+                print("reference_spectra not calculated, using global average spectra")
+                spectra = np.average(self.tofdata, axis=0)
+                spectra = spectra.compute()
+            else:
+                print("Target spectra not provided! Using reference spectra.")
+                spectra = self.reference['reference_spectrum']
+                spectra_mass_axis = self.reference['rs_mass_axis']
         
         # Initialize the GUI and pass 'self' (this exact deployment instance) into it
         app = SpectrumWizardGUI(deployment_obj=self, spectra=spectra,
@@ -3204,43 +3499,6 @@ class Deployment:
         # Pre-sort database by exact mass for fast binary search candidate lookups
         return df.sort_values("ExactMass").reset_index(drop=True)
 
-    def search_compositions(self, peak_mass, ionization=None, tolerance=0.01):
-        """
-        Search for candidate chemical formula compositions matching an observed m/z value.
-
-        Queries the packaged formula database (`self.peak_assignment_db`) for elemental 
-        formulas whose theoretical mass falls within `tolerance` (m/z) of `peak_mass` 
-        given the specified ionization adduct.
-
-        Parameters
-        ----------
-        peak_mass : float
-            Observed experimental mass-to-charge (m/z) value.
-        ionization : str, default="H+"
-            Ionization adduct string (e.g., ``"H+"``, ``"I-"``, ``"electron"``).
-        tolerance : float, default=0.01
-            Mass matching tolerance window in m/z units.
-
-        Returns
-        -------
-        pandas.DataFrame
-            DataFrame of matching candidate chemical formulas, exact masses, and mass errors.
-        """
-        # Local import to prevent circular dependencies
-        from opentof.utils import find_possible_compositions
-
-        if ionization is None:
-            ionization = "H+"
-            print(f"'ionization' not provided. Assuming PTR chemistry: ionization={ionization}")
-
-        # Execute candidate composition search using pre-loaded formula database
-        return find_possible_compositions(
-            peak_mass, 
-            ionization=ionization, 
-            tolerance=tolerance, 
-            formula_db=self.peak_assignment_db, 
-            mass_array=self.peak_assignment_mass_array
-        )
 
     def fix_external_calibration(self, true_masses, search_range=None, 
                                  mode=0, peak_type='gaussian', plot_flag=True,
@@ -3393,14 +3651,14 @@ class Deployment:
             
             # Subplot 1: Previous broken mass alignment
             ax_before.plot(old_mass_axis, sample_spectrum, color='crimson', lw=1.2, label='Previous External Mass Axis')
-            ax_before.set_title("BEFORE: Mis-aligned external calibration", fontsize=11, fontweight='bold')
+            ax_before.set_title("BEFORE: Mis-aligned external calibration", fontsize=11,)
             ax_before.set_ylabel("Intensity (ions/s)")
             ax_before.grid(True, linestyle='--', alpha=0.5)
             ax_before.legend(loc='upper left')
             
             # Subplot 2: Corrected mass alignment
             ax_after.plot(corrected_axis, sample_spectrum, color='forestgreen', lw=1.2, label='Corrected Mass Axis')
-            ax_after.set_title("AFTER: Mass Axis after 'manual' recalibration", fontsize=11, fontweight='bold')
+            ax_after.set_title("AFTER: Mass Axis after 'manual' recalibration", fontsize=11,)
             ax_after.set_xlabel("Mass-to-charge (m/z)")
             ax_after.set_ylabel("Intensity (ions/s)")
             ax_after.grid(True, linestyle='--', alpha=0.5)
@@ -3554,7 +3812,11 @@ class Deployment:
         return False
 
     # TODO revisit SOM helpers and wrapper functions...
-    def nominal_mass_som(self, nm, **kwargs):
+    def nominal_mass_som(self, nm, 
+                         som_size=None,
+                         output_dir=None, 
+                         plot_subdir=None, 
+                         **kwargs):
         from opentof.som_helpers import (
             RowMinMaxScaler, build_nm_som, organize_som_data,
             process_som_weight_peaks
@@ -3600,8 +3862,12 @@ class Deployment:
         print(f"Number of samples: {len(input_samples)}")
         print(f"Vectorized feature length: {input_samples.shape[1]}")
 
+        if som_size is None:
+            print("'som_size' not provided, using some default size: (5,5)")
+            som_size = (5,5)
+
         # Build/Train the SOM
-        som = build_nm_som(nm, input_samples)
+        som = build_nm_som(nm, input_samples, som_size=som_size)
         
         # Organize the data
         nm_node_data, som_err_metrics = organize_som_data(
@@ -3623,7 +3889,8 @@ class Deployment:
         
         return nm_node_data, som_err_metrics, som
 
-    def export_to_h5(self, output_dir=None, driver="PIF"):
+
+    def export_to_h5(self, output_dir=None, driver="PIF") -> Deployment:
         """
         Export workspace state, mass calibrations, baselines, and peak shapes to HDF5 files.
 
@@ -3672,7 +3939,7 @@ class Deployment:
             self._export_p(output_dir)
             return self
 
-    def import_from_h5(self, filepath, driver="PIF"):
+    def import_from_h5(self, filepath, driver="PIF") -> Deployment:
         """
         Import configurations, mass calibrations, and peak shapes from HDF5 state files.
 
@@ -3727,9 +3994,7 @@ class Deployment:
             self._import_p(path_obj)
             return self
 
-    # =========================================================================
-    # EXPORT HELPERS
-    # =========================================================================
+
     # =========================================================================
     # EXPORT HELPERS
     # =========================================================================
@@ -4059,7 +4324,7 @@ class Deployment:
                     file_df = self.peak_data.iloc[start_idx:end_idx]
 
                     for p_idx, p_name in enumerate(peak_names):
-                        col_name = f"{p_name}_amplitude"
+                        col_name = f"{p_name}_area"
                         if col_name in file_df.columns:
                             intensities = file_df[col_name].values
                             flat_array = np.zeros(actual_writes * actual_bufs, dtype=np.float32)
@@ -4250,7 +4515,8 @@ class Deployment:
                 fs_grp.attrs["MassCalibration preAv_flag"] = np.float32(1.0)
                 fs_grp.attrs["MassCalibration sBuf"] = np.float32(-1.0)
                 fs_grp.attrs["MassCalibration timeAv_flag"] = np.float32(1.0)
-                fs_grp.attrs["MassCalibration timeAv_mins"] = np.float32(2.0)
+                # fs_grp.attrs["MassCalibration timeAv_mins"] = np.float32(2.0)
+                fs_grp.attrs["MassCalibration timeAv_mins"] = int(self._averaged_dataset_interval / 60)
                     
                 fs_grp.attrs["MassCalibration nbrPoints"] = np.int8(len(cals))
                 avg_file_pars = np.mean(sliced_pars, axis=0)

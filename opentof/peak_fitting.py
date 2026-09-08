@@ -402,7 +402,7 @@ def calculate_detection_threshold(intensity_axis, noise_level=None, noise_std_mu
     if noise_level is None:
         noise_level = estimate_local_noise_level(intensity_axis=intensity_axis, noise_multiplier=noise_multiplier)
 
-    # Evaluate signal power percentile and absolute detection limit
+    # Evaluate signal power percentile and find a typical threshold above the noise
     signal_power = float(np.percentile(intensity_axis, signal_percentile))
     detection_threshold = float(noise_std_mult * noise_level)
     snr = float(signal_power / (noise_level + 1e-8))
@@ -1036,7 +1036,7 @@ def multi_overlap_peak_fit(mass_axis,
     Deconvolute and fit multiple overlapping peaks within a spectral region.
 
     Identifies candidate peak centers via Savitzky-Golay smoothed 2nd derivative 
-    extrema, applies threshold filters (detection limit, relative/absolute intensity, 
+    extrema, applies threshold filters (detection threshold, relative/absolute intensity, 
     prominence), enforces spatial separation constraints, and performs non-linear 
     least-squares fitting. Supports an iterative "Grand Loop" to add forced peak 
     candidates at regions of large residual discrepancy.
@@ -1160,10 +1160,10 @@ def multi_overlap_peak_fit(mass_axis,
             x_label = "Mass (m/z)" if plot_type.lower() == "mass" else "ToF (ns)"
             
             # --- TOP PANEL: Spectrum and detection thresholds ---
-            ax1.plot(plot_x, intensity_axis, label='Original Data', color='blue', alpha=0.7, zorder=2)
+            ax1.plot(plot_x, intensity_axis, label='Original Signal', color='black', alpha=0.7, zorder=2)
             
             # Draw detection threshold gatekeeper lines
-            ax1.axhline(noise_dict['detection_threshold'], label=f'Detection Limit ({noise_std_mult}σ)', linestyle="-.", color='red', alpha=0.3)
+            ax1.axhline(noise_dict['detection_threshold'], label=f'Detection Threshold ({noise_std_mult}σ)', linestyle="-.", color='red', alpha=0.3)
             ax1.axhline(noise_dict['signal_power'], label='Signal Power (p95)', linestyle="-.", color='purple', alpha=0.3)
 
             # Scatter rejected candidates
@@ -1172,7 +1172,7 @@ def multi_overlap_peak_fit(mass_axis,
                             color='darkorange', marker='v', s=25, label='Rejected Candidates', zorder=4)
 
             # Diagnostic summary text box
-            diagnostic_text = "Fitted area: 0.000%\n of Original\nPeaks: 0"
+            diagnostic_text = "0.000% of Original\nPeaks: 0"
             ax1.text(
                 0.98, 0.95, diagnostic_text,
                 horizontalalignment='right', verticalalignment='top',
@@ -1414,7 +1414,7 @@ def multi_overlap_peak_fit(mass_axis,
         x_label = "Mass (m/z)" if plot_type.lower() == "mass" else "ToF (ns)"
         
         # --- TOP PANEL: Raw data and deconvoluted peak curves ---
-        ax1.plot(plot_x, intensity_axis, label='Original Data', color='blue', alpha=0.7, zorder=2)
+        ax1.plot(plot_x, intensity_axis, label='Original Signal', color='black', alpha=0.7, zorder=2)
         ax1.plot(plot_x, fitted_curve, label='Total Composite Fit', color='green', lw=2, zorder=3)
         
         for i, raw_p in enumerate(results):
@@ -1426,7 +1426,7 @@ def multi_overlap_peak_fit(mass_axis,
             ax1.axvline(center_coord, color='gray', linestyle=':', alpha=0.5)
 
         # Plot the detection threshold ("where the noise ends and signal starts") cutoff line
-        ax1.axhline(noise_dict['detection_threshold'], label=f'Noise ceiling ({noise_std_mult}σ)', linestyle="-.", color='red', alpha=0.3)
+        ax1.axhline(noise_dict['detection_threshold'], label=f'Detection Threshold ({noise_std_mult}σ)', linestyle="-.", color='red', alpha=0.3)
         ax1.axhline(noise_dict['signal_power'], label='Signal Power (p95)', linestyle="-.", color='purple', alpha=0.3)
 
         # Draw visual marks for raw 2nd derivative candidates before filtering/pruning
@@ -1434,7 +1434,7 @@ def multi_overlap_peak_fit(mass_axis,
             ax1.scatter(plot_x[filtered_peaks], intensity_axis[filtered_peaks], 
                         color='darkorange', marker='v', s=25, label='Initial Candidates', zorder=4)
 
-        diagnostic_text = f"Fitted area: {area_ratio:.3f}%\nof Original\nPeaks: {len(results)}"
+        diagnostic_text = f"{area_ratio:.3f}% of Original\nPeaks: {len(results)}"
         ax1.text(
             0.98, 0.95, diagnostic_text,
             horizontalalignment='right', verticalalignment='top',
@@ -1445,7 +1445,7 @@ def multi_overlap_peak_fit(mass_axis,
         ax1.set_title(f"Multi-Overlapping Peak Fit (m/z ~ {nominal_mass_label})")
         ax1.set_ylabel("Intensity (ions/s)")
         ax1.legend(fontsize='small', loc='upper left', ncol=2 if len(results) > 4 else 1)
-        ax1.grid(True, linestyle=':', alpha=0.5)
+        ax1.grid(True, linestyle='--', alpha=0.5)
 
         # --- BOTTOM PANEL: Residual error profile ---
         raw_residuals = intensity_axis - fitted_curve
@@ -1581,7 +1581,6 @@ def fit_mopf_nm(spectra, n_mass, mass_axis,
         plot_label=plot_label
     )
 
-    # Return deconvolution result dictionary
     return fit_result
 
 def fit_partially_constrained_nm(

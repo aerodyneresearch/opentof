@@ -2,6 +2,8 @@
 
 **OpenTof** is a Python module that (like most Python modules) relies on code that has already been written by others to run.
 
+If `pip install opentof` does not work, first make sure you have created an appropriate Python environment, try again, and if it still doesn't work try the procedure below:
+
 ### **There are three steps to installing OpenTof in its current state (beta release)**:
 
 1. Create a Python environment using your preferred method (.venv or conda).

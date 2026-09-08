@@ -1659,8 +1659,13 @@ def mass_dependent_error_plot(calibration_results,
 
     # Save and display figure
     plt.tight_layout()
-    filename = "mass_dependent_error.png"
+
+    if output_dir is None:
+        output_dir = get_default_plot_dir()
+
+    filename = "mc_mass_dependent_error.png"
     plt.savefig(os.path.join(output_dir, filename), bbox_inches='tight')
+
     if show_plot_flag:
         plt.show()
     plt.close()
@@ -2461,7 +2466,7 @@ def determine_baseline(intensity_spectrum,
                        plot_flag=True,
                        show_plot_flag=True,
                        plt_log_flag=False,
-                       plt_y_max=1,
+                       plt_y_max=10,
                        plt_y_min=-0.05,
                        plt_si_vis_center=None,
                        plt_si_vis_window=None):
@@ -2653,10 +2658,10 @@ def determine_baseline(intensity_spectrum,
 
         if output_dir is None:
             output_dir = get_default_plot_dir()
-            ensure_dir(output_dir)
-            
-            filename = "baseline_subtraction.png"
-            plt.savefig(os.path.join(output_dir, filename), bbox_inches='tight')
+        ensure_dir(output_dir)
+
+        filename = "baseline_subtraction.png"
+        plt.savefig(os.path.join(output_dir, filename), bbox_inches='tight')
         
         if show_plot_flag:
             plt.show()
