@@ -219,7 +219,7 @@ def get_nm_segment_data(nm, spectra, mass_axis, tof_axis, nm_search_range=0.5):
     tof_axis : numpy.ndarray
         1D array of physical time-of-flight coordinates in nanoseconds.
     nm_search_range : float, default=0.5
-        Half-width window size in $m/z$ units ($[\\text{nm} - \\Delta, \\text{nm} + \\Delta]$).
+        Half-width window size in $m/z$ units ($[nm - Δ, nm + Δ]$).
 
     Returns
     -------
@@ -258,7 +258,7 @@ def spectra_nm_split(spectra, mass_axis, tof_axis, sr=0.5):
     tof_axis : numpy.ndarray
         1D array of time-of-flight coordinates in nanoseconds.
     sr : float, default=0.5
-        Half-width nominal mass search range in $m/z$ units ($\\Delta m/z$).
+        Half-width nominal mass search range in $m/z$ units ($Δ m/z$).
 
     Returns
     -------
@@ -376,7 +376,7 @@ def get_raw_nm_data(nm, tofdata, tof_axis, calibration_results, mode='extrap'):
 
     Iterates through all spectra (writebufs) in memory-safe chunks, reconstructs the 
     calibrated mass axis for each scan, and slices out localized segment profiles 
-    around the requested nominal mass integer ($nm \pm 0.5\ \text{m/z}$). Computes 
+    around the requested nominal mass integer ($nm +- 0.5 m/z$). Computes 
     the negative second derivative to highlight peak curvature and standardizes 
     all extracted arrays to uniform lengths.
 
@@ -485,7 +485,7 @@ def plot_peak_fits(ms_i, nm, tofdata_subtracted, peak_list_df,
     ms_i : int
         0-based index of the target mass spectrum / writebuf to plot.
     nm : int or float
-        Target nominal mass integer ($m/z$) defining the visualization window ($nm \pm 0.5$).
+        Target nominal mass integer ($m/z$) defining the visualization window ($nm +- 0.5$).
     tofdata_subtracted : dask.array.Array or numpy.ndarray
         2D baseline-subtracted time-of-flight spectral data array of shape ``(num_spectra, num_samples)``.
     peak_list_df : pandas.DataFrame
@@ -693,7 +693,7 @@ def median_absolute_deviation(arr):
 
     .. math::
 
-        \\text{MAD} = \\text{median}(|X - \\text{median}(X)|)
+        MAD = median(|X - median(X)|)
 
     Parameters
     ----------
@@ -959,12 +959,12 @@ def cluster_discovered_peaks(
         and `'spectra_index'`.
     peak_width_coeffs : tuple or list of float, optional
         Calibration coefficients $(S, B)$ for linear peak width parameterization 
-        $\text{FWHM}(m) = S \cdot m + B$. Required for global $z$-space clustering (Strategy 1).
+        $FWHM(m) = S * m + B$. Required for global $z$-space clustering (Strategy 1).
     peak_width_func : callable, optional
         Fallback function evaluating expected FWHM per nominal mass ($m/z$). Used for local 
         chunking (Strategy 2) if `peak_width_coeffs` are absent or invalid.
     eps_fwhm : float, default=0.3
-        DBSCAN clustering distance threshold in FWHM units (e.g., $0.3 = 0.3 \cdot \text{FWHM}$ radius).
+        DBSCAN clustering distance threshold in FWHM units (e.g., $0.3 = 0.3 * \text{FWHM}$ radius).
     min_spectra_fraction : float, default=0.1
         Minimum fraction of total unique spectra required to form a valid DBSCAN cluster.
 
@@ -1091,13 +1091,13 @@ def plot_apd_peaks(
     nominal_mass : int, float, or None, default=None
         Target nominal mass integer ($m/z$) to filter and zoom into. If ``None``, plots the full spectrum.
     search_range : float, default=0.5
-        Half-width $m/z$ window range around `nominal_mass` ($[\text{NM} - \Delta, \text{NM} + \Delta]$).
+        Half-width $m/z$ window range around `nominal_mass` ($NM - Δ, NM + Δ]$).
     y_margin : float, default=1.2
-        Multiplier scaling the maximum visible intensity for dynamic $y$-axis headroom (e.g., $1.2 = 120\%$).
+        Multiplier scaling the maximum visible intensity for dynamic $y$-axis headroom (e.g., $1.2 = 120 percent$).
     seed : int, default=42
         Random seed ensuring reproducible high-contrast HSV color mapping across cluster labels.
     vline_maximum : float, default=10000
-        Maximum upper height limit ($y_{\text{max}}$) for vertical cluster indicator lines.
+        Maximum upper height limit ($y_{max}$) for vertical cluster indicator lines.
     """
     # Ensure input spectral arrays are 1D NumPy arrays
     mass_axis = np.asarray(mass_axis)
@@ -1492,7 +1492,7 @@ def regr_scatter_plot(actual, pred, color='blue', title='scatter plot',
     plot_filename : str or None, default=None
         Filename for the saved plot image.
     log_flag : bool, default=False
-        If ``True``, renders both axes in logarithmic scale ($\log_{10}$) with log major/minor locators.
+        If ``True``, renders both axes in logarithmic scale ($log_{10}$) with log major/minor locators.
     show_plot_flag : bool, default=True
         If ``True``, displays the figure interactively.
     """

@@ -34,7 +34,7 @@ def _normalize_isotope_relative_intensities(isotopes):
     Convert monoisotopic-referenced relative intensities into a true probability distribution.
 
     Normalizes raw atomic relative abundance values (typically scaled to a monoisotopic base peak 
-    height of 100) such that the sum of all isotopic probabilities equals 1.0 ($\sum p_i = 1$).
+    height of 100) such that the sum of all isotopic probabilities equals 1.0 ($sum p_i = 1$).
 
     Parameters
     ----------
@@ -72,7 +72,7 @@ def convolve_distributions(dist1, dist2, cutoff=1e-20, debug=False):
     dist2 : list of tuple of (float, float)
         Second distribution represented as a list of ``(mass, probability)`` tuples.
     cutoff : float, default=1e-20
-        Minimum joint probability threshold ($p_1 \cdot p_2$). Combinations below 
+        Minimum joint probability threshold ($p_1 * p_2$). Combinations below 
         this value are pruned to reduce memory overhead.
     debug : bool, default=False
         If ``True``, prints diagnostic convolution statistics to stdout.

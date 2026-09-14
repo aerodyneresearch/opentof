@@ -17,7 +17,6 @@ import json
 from scipy.interpolate import interp1d
 import inspect
 import warnings
-from typing import Self # Or use 'Deployment' as a string if using older Python
 
 
 class Deployment:
