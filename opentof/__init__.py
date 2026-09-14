@@ -97,6 +97,11 @@ from opentof.som_helpers import (
     process_som_weight_peaks,
 )
 
+from opentof.interactive import (
+    SpectrumWizardGUI, 
+    launch_wizard
+)
+
 __all__ = [
     "Deployment",
     "run_do_it",
@@ -168,4 +173,6 @@ __all__ = [
     "isotope_signal_on_axis",
     "subtract_isotopes",
     "reconstruct_total_isotope_signal",
+    "SpectrumWizardGUI", 
+    "launch_wizard",
 ]

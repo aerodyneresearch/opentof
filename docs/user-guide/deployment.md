@@ -21,7 +21,7 @@ import opentof as ot
 Call the Deployment constructor (initializing the Deployment object).
 
 ```python
-deployment_dir_path = r"E:/Users/someUser/PTR_data/20260313_example_deployment"
+deployment_dir_path = r"E:/Users/someUser/PTR_data/20260313_SuncorP66_CAT"
 d = ot.Deployment.from_directory(deployment_dir_path)
 # Output
 """
@@ -799,13 +799,13 @@ d.plot_peak_data_for("C6H6+", parameter='amplitude',
 
 ![deployment_plot_peak_data_amplitude](../assets/images/deployment_md/deployment_peak_data_amplitude.png)
 
-### Deployment.plot_nnls_fit_w_isotopes
+### Deployment.fit_nm_constrained
 
-This function can be used to run the "constrained" fitting procedure on a segment of signal. It will also plot any isotoptic influences based on the current `Deployment.peak_list` if available. 
+This function can be used to run the "constrained" fitting procedure on a segment of signal. It will also plot any isotoptic influences based on the current `Deployment.peak_list` if available.
 
-The function takes a specific `ms_i` which is the spectra index to plot 
+Calling this function will populate `Deployment.diagnostic_fits` which 
 
-In our example peak list we have both `C3H6O(H2O)H+`, which is an acetone water cluster, and `C6H6+` which is charge transfer benzene. The acetone water cluster happens to produce an isotope at the same mass-to-charge as charge transfer benzene.
+In our example peak list we have both `C3H6O(H2O)H+`, which is an acetone water cluster, and `C6H6+` which is charge transfer benzene. The acetone water cluster happens to produce an isotope at the same mass-to-charge as charge transfer benzene (at `m/z=78`).
 
 You can also see the overlapping isotope be inspecting the dictionary within `Deployment.isotopes` after running `d.populate_peak_list_and_isotopes(peak_list)`.
 
@@ -835,12 +835,11 @@ d.isotopes
 """
 ```
 
-However, to see the effect of this isotope on signal quantification at a specific writebuf/MS index you could to run something like this:
+However, to see the effect of this isotope on a peak ran at nominal mass 78 we can run an example like: 
 
 ```python
-ms_i = 300
-d.plot_nnls_fit_w_isotopes(ms_i, 77, peak_type='custom')
-d.plot_nnls_fit_w_isotopes(ms_i, 78, peak_type='custom')
+d.fit_nm_constrained(nominal_mass=77, peak_type='custom')
+d.fit_nm_constrained(nominal_mass=78, peak_type='custom')
 ```
 
 First we can plot at nominal mass 77 to see the parent peak:
@@ -850,7 +849,80 @@ Then we can create a plot at 78 to see the effect of the isotope on the specific
 
 ![benzene_nnls_fit](../assets/images/deployment_md/deployment_nnls_ct_benzene.png)
 
+We can also call this on a specific mass spectrum index for example index `2555` which for this Deployment Object represents a period where the calibration gas is actively flowing into the instrument during a sensitivity calibration.
+
+![benzene_active_cal_gas_fit](../assets/images/deployment_md/deployment_nnls_active_cal_gas_benzene.png)
+
+The results from running this function can be retrieved through the `Deployment.diagnostic_fits` attribute. This is a nested dictionary whose contents depends on previous calls to both `fit_nm_constrained` and `fit_nm_unconstrained`. For our nominal mass `77` and `78` example this dictionary has two entry:
+
+```python
+print(d.diagnostic_fits.keys()) # Two entries
+print(d.diagnostic_fits['constrained_78'].keys()) # Information for each entry
+# output
+"""
+dict_keys(['constrained_77', 'constrained_78'])
+dict_keys(['nominal_mass', 'mz_segment', 'int_segment', 'total_fit', 'peaks', 'fit_params'])
+"""
+```
+
+NOTE: This function is generally acts as a way to diagnose fits on certain spectra and should generally not be used as a bulk fitting function. Please see `FFI_constrained` for a function with better scalability.
+
 For more about isotopes within OpenTof see [isotopes.md](../user-guide/isotopes.md).
+
+### Deployment.fit_nm_unconstrained
+
+This function can be used to call the `fit_unconstrained_peaks` function (the 'low-level' method behind `FFI_unconstrained`) on an isolated spectra segment. 
+It can be useful when fine-tuning fitting parameters before running the full `FFI_unconstrained` function
+
+The most basic to this function is as follows:
+
+```python
+result = d.fit_nm_unconstrained(nominal_mass=121)
+```
+
+Which produces the following plot:
+
+![unconstrained_fit_at_nm_121](../assets/images/deployment_md/deployment_fit_nm_unconstrained.png)
+
+If using all defaults, this method also acts like a multi-overlapping peak fitter as an initial peak discovery step is triggered to populate initial guesses for the unconstrained fitter.
+
+If you would like to specify a certain peak (or peaks) to diagnose during the unconstrained fit you can pass a list of string formulas (or raw float values) via the `initial_masses` parameter:
+
+```python
+d.fit_nm_unconstrained(
+    nominal_mass=121, 
+    initial_masses=["C9H12H+"], # Trimethylbenzene
+    peak_type='custom'
+)
+```
+
+![trimethylbenzene_fit_at_nm_121](../assets/images/deployment_md/deployment_fit_nm_unconstrained_tmb.png)
+
+Lets make one more plot showing the functions response with an added unknown mass:
+
+```python
+d.fit_nm_unconstrained(
+    nominal_mass=121,
+    initial_masses=["C9H12H+", 121.02], # Trimethylbenzene, some uknonwn
+    peak_type='custom'
+)
+```
+
+![trimethylbenzene_fit_at_nm_121](../assets/images/deployment_md/deployment_fit_nm_unconstrained_tmb_pu.png)
+
+Just like in `fit_nm_constrained` a `ms_i` (mass spectrum index) can be provided to run the fitting procedure over a specific spectra. It will pull from `Deployment.tofdata_subtracted` which is the baseline subtracted version of `Deployment.tofdata`.
+
+The results from running this function can be retrieved through the `Deployment.diagnostic_fits` attribute. This is a nested dictionary whose contents depends on previous calls to both `fit_nm_constrained` and `fit_nm_unconstrained`. For our nominal mass `121` example this dictionary has one entry:
+
+```python
+print(d.diagnostic_fits.keys()) # One entry for nominal mass 121
+print(d.diagnostic_fits['unconstrained_121'].keys()) # information for some entry
+# output
+"""
+dict_keys(['unconstrained_121'])
+dict_keys(['nominal_mass', 'mz_segment', 'int_segment', 'total_fit', 'peaks', 'fit_params'])
+"""
+```
 
 ### Deployment.populate_nm_data_for
 
@@ -914,27 +986,29 @@ The function can be called with:
 
 ```python
 # basic call, just perform fits and return dataframe
-apd_results = d.automated_peak_discovery()
+d.automated_peak_discovery()
 
 # or if you want to directly overwrite the current peak list with the found unknown peaks
-apd_results = d.automated_peak_discovery(overwrite=True)
+d.automated_peak_discovery(overwrite=True)
 
 # of if you would like a plot of each of the mopf at each nominal mass:
 #  plotting increases runtime significantly (from ~5sec to ~3min for sigle Eiger spectra)!
-apd_results = d.automated_peak_discovery(show_plot_flag=False, # dont show each plot
-                                     save_plot_flag=True, # but do save them!
-                                     output_dir=None, # default OpenTof location
-                                     plot_subdir=None,) # use default subdir name
+d.automated_peak_discovery(show_plot_flag=False, # dont show each plot
+                           save_plot_flag=True, # but do save them!
+                           output_dir=None, # default OpenTof location
+                           plot_subdir=None,) # use default subdir name
 
 # or if called using the averaged dataset (activates use of DBSCAN on found peak positions):
-apd_results = d.automated_peak_discovery(use_averaged_dataset=True) # Took around 5min for Eiger data
+d.automated_peak_discovery(use_averaged_dataset=True) # Took around 5min for Eiger data
 ```
 
-Pulling a good example from one of the produced "mopf" plots when `save_plot_flag=True` looks something like this:
+Pulling a good example from one of the produced "mopf" plots when `save_plot_flag=True`:
 
 ![mopf_at_nominal_mass_71](../assets/images/deployment_md/deployment_mopf_spec-1_nm71.png)
 
 Remember that if both `output_dir` and `plot_subdir` are left as `None` OpenTof will default to a location within the user's home directory. Look for the "OpenTof" directory.
+
+The result of running the function is stored in `Deployment.apd_df`. 
 
 The resulting dataframe has the form:
 
@@ -975,7 +1049,7 @@ To see the discovered peaks across the whole spectrum, we could plot something l
 ```python
 plt.figure(figsize=(12,6))
 plt.plot(d.first_guess_mass_axis, d.reference['reference_spectrum'], color="purple", label="reference spectrum")
-plt.vlines(x=apd_results['center_mass'].values, ymin=-1, ymax=10000,
+plt.vlines(x=d.apd_df['center_mass'].values, ymin=-1, ymax=10000,
            color="grey", linestyle="--", alpha=0.01, label="found unknown masses")
 plt.grid(True, alpha=0.3, linestyle=":")
 plt.title("Automated Peak Discovery using averaged dataset and DBSCAN clustering")
@@ -991,7 +1065,7 @@ We can also use a function from `utils.py` to help us plot the result at an indi
 
 ```python
 ot.plot_apd_peaks(
-    df=apd_results,
+    df=d.apd_df,
     mass_axis=d.first_guess_mass_axis,
     spectrum=d.reference['reference_spectrum'],
     nominal_mass=71,
@@ -1002,7 +1076,129 @@ ot.plot_apd_peaks(
 
 Here we can see the results of this clustering for nominal mass 71. 
 
+If you find yourself calling `automated_peak_discovery` frequently and/or are immediately filtering results down to a specified nominal mass, consider using `fit_mopf_nm (peak_fitting.py)` or `multi_overlap_peak_fit (peak_fitting.py)` to save time!
+
 For more about this method please see the following explainations contained within [utils.md](../user-guide/utils.md)
 
-### Deployment.fit_nm_unconstrained
+### Deployment.launch_wizard
 
+Launches the interactive GUI found in `interactive.py`
+
+This is in an experimental state. If you find it useful please consider contributing!
+
+### Deployment.fix_external_calibration and Deployment.auto_fix_external_calibration
+
+Sometimes the external calibration can be off! In which case `d.first_guess_mass_axis` is likely to incorrect and produce non-physical results.
+
+If you notice reagent peaks in the wrong spot on the mass axis this method can be used to reset the mass axis (akin to a manual mass calibration on the instrument itself).
+
+It relies on assuming the composition of the most intense peaks within the mass spectrum. At CDPHE this can sometimes happen with Vocus AIM "B" data. In which case the fix for a broken external calibration can be called via:
+
+```python
+iodide_truths = [
+                    ot.return_mass("I-"),  # Tallest: I-
+                    ot.return_mass("IH2O-"),  # Second tallest: IH2O-
+                ] 
+
+d.fix_external_calibration(true_masses=iodide_truths)
+# output
+"""
+Sampling 100 random spectra to isolate anchor peaks...
+Searching for the top 2 peak profiles in index space...
+  -> Peak 1 localized at Sample Index: 7000.88 (Raw Intensity: 5.45e+05)
+  -> Peak 2 localized at Sample Index: 7696.85 (Raw Intensity: 2.36e+05)
+
+Matching sample indices to user expectations:
+  Index 7000.88  ===>  True m/z 126.9050
+  Index 7696.85  ===>  True m/z 144.9156
+
+Regressing new calibration parameters for Mode 0...
+Success! Solved Parameters: [np.float64(900.490409), np.float64(-3143.336327)]
+"""
+```
+
+It also produces a visualization of the correction:
+
+![fix_external_calibration](../assets/images/deployment_md/deployment_fix_external_calibration.png)
+
+NOTE: Since this method relies on the known peaks being the most and second most intense peaks in the spectrum, if an unknown peak reaches intensities where it can iterfere with this, a `None` can be placed in a certain position within the `truths` array to account for this.
+
+So a `truths` array with `I-` being the most intense peak, some unknown peak being the second most intense peak, and `IH2O-` being the third most intense peak would like:
+
+```python
+iodide_truths = [
+                    ot.return_mass("I-"),  # Tallest: I-
+                    None, # Unknown in second tallest
+                    ot.return_mass("IH2O-"),  # Third tallest: IH2O-
+                ] 
+```
+
+A helper function to iteratively try combinations of the peaks within the `truths` array is also available within OpenTof as `auto_fix_external_calibration`.
+
+The difference between `fix_external_calibration` and `auto_fix_external_calibration` is that in `auto_fix_external_calibration` only the known `truths` should be used (no `None` peaks) as `None` (unknown) peaks will be automatically injected between the unknown peaks. 
+
+The `auto_fix_external_calibration` also bases its "corrected" mass axis based on a provided `target_max` this should be populated with the typical highest mass to charge observed when the instrument is operating under normal conditions.
+
+### Deployment.nominal_mass_som (Experimental!)
+
+This function has yet to be updated to match changes to core methods
+
+### Deployment.export_to_h5
+
+This is the primary function used to save an OpenTof deployment object (since it cannot be pickled directly due to underlying .h5 file structure).
+
+To export a Deployment object first determine where the files are to be saved (can be/often is the same as the RAW data) then call:
+
+```python
+d.export_to_h5(output_dir=r"C:\Users\vageiser\Desktop\test", driver="PIF")
+```
+
+There are a few different `driver`s available currently.
+
+To save Tofware formatted `"IF"` and `"_P"` files use `driver="PIF"`.
+To save the Deployemnt object for use later by OpenTof again use `driver="OT"`
+
+### Deployment.import_from_h5
+
+By default when initializing a `Deployment` object with `from_directory` OpenTof will automatically look for `"IF"` and `"Processed"` files present in subdirectories where the raw data is stored (typically how Tofware saves files). However, to explicitly read these files into a `Deployment` object this method can be used. However, this method must be used when importting previously saved `Deployments` using the `"OT"` driver.
+
+```python
+# # Earlier...
+# d.export_to_h5(output_dir=r"C:\Users\vageiser\Desktop\test", driver="OT")
+
+# Now
+dd = ot.Deployment() # Can be empty for driver="OT
+dd.import_from_h5(r"C:\Users\vageiser\Desktop\test\opentof_deployment.h5", driver="OT")
+
+print(dd.tofdata)
+# output 
+"""
+dask.array<array, shape=(8194, 31104), dtype=float32, chunksize=(1000, 31104), chunktype=numpy.ndarray>
+"""
+```
+
+If exporting using `driver="PIF"` to the same directory as the raw data `import_from_h5` can be skipped as OpenTof will automatically read in these directories via `from_deployment`. However, if `"IF"` and `"Proccesed"` files are saved elsewhere, then this method should still be used like so:
+
+```python
+dd = ot.Deployment.from_directory(r"C:\path\to\data\20260508") 
+dd.import_from_h5(r"C:\path\to\data\somewhere_else", driver="PIF")
+```
+
+### Deployment.export_peak_list_to_Tofware
+
+This is a helper function that will export the currently active `Deployment.peak_list` and format it so it can be read into Tofware.
+
+```python
+dd.export_peak_list_to_tofware() # uses default save location
+# output
+"""
+✅ Tofware peak list exported successfully (1113 peaks) to:
+  -> C:\Users\vageiser\OpenTof\20260508_145024\tofware_peak_list.txt
+"""
+```
+
+### HDF5ArrayWrapper
+
+This is the only code within `deployment.py` that is not part of `class Deployment`. This code acts as the intermediary between raw .h5 files and many of the functions within OpenTof. 
+
+Its purpose is to help with out-of-core/larger than memory datasets while still being able to seriealze during parallel execution (during `FFI` routines).

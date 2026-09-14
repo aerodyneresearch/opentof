@@ -103,9 +103,12 @@ class RowMinMaxScaler:
         
         Returns
         -------
-        np.ndarray
+        np.ndarray or None
             Reconstructed prototype in original space.
         """
+        if node_scalers is None or len(node_scalers) == 0:
+            return None
+
         # Tile the node weight so we can inverse-transform for each sample
         tiled = np.tile(node_weight_scaled, (len(node_scalers), 1))
         reconstructions = RowMinMaxScaler.inverse_transform(tiled, node_scalers)
@@ -127,11 +130,11 @@ def build_nm_som(nm,
                  learning_rate=0.2,
                  nbh_function='gaussian',
                  decay_function='linear_decay_to_zero',
-                 sigma_decay_function='asymptotic_decay', #'linear_decay_to_one'  # 'linear_decay_to_one'
-                 init='random',  # 'random' # 'pca'
-                 train='random', # 'random', 'batch'
+                 sigma_decay_function='asymptotic_decay', 
+                 init='random',  
+                 train='random', 
                  max_iter=None,
-                 topology='hexagonal',  # 'hexagonal' # 'rectangular'
+                 topology='hexagonal',  
                  activation_distance='euclidean',
                  verbose=False,
                  random_seed=42
@@ -162,7 +165,7 @@ def build_nm_som(nm,
         print("Initializing SOM with random weights...")
         som.random_weights_init(input_samples)
 
-    # Begin the Learning Curve visualization code
+    # Begin training process
     print(f"Begin [nm: {nm}] SOM Training...")
     start = time.time()
 
@@ -173,10 +176,8 @@ def build_nm_som(nm,
         print("Training SOM with randomly ordered samples...")
         som.train_random(input_samples, max_iter, verbose=verbose)
     
-    # Print a message to the user that the som generation process has completed
     print(f"End [nm: {nm}] SOM Training!")
 
-    # Stop the LC plotting timer
     end = time.time()
     length = end - start
     print(f"[nm: {nm}] SOM training took: {np.round(length, 3)} seconds!")
@@ -248,7 +249,6 @@ def assign_cluster_labels(all_node_data):
     Assigns cluster labels based on shared internal_node_grid.
     Adds a 'cluster_label' entry to each node in all_node_data_scaled.
     """
-    # Map each unique internal_node_grid to a cluster ID
     internal_node_to_label = {}
     cluster_counter = 0
 
@@ -265,12 +265,10 @@ def assign_cluster_labels(all_node_data):
 
 def organize_som_data(som, input_samples, variable_names, variable_scalers, variable_length, topology='hexagonal'):
     """
-    Helper function to organize a few SOM parameters into a Python dictionary
+        Helper function to organize a few SOM parameters into a Python dictionary
     for easy access.
-
     Will dynamically create the dictionary for any sized SOM.
     Node parameters within the dictionary can be accessed via (i,j) node indicies.
-
     Parameters
     ----------
     som : MiniSom
@@ -286,7 +284,6 @@ def organize_som_data(som, input_samples, variable_names, variable_scalers, vari
     topology: str (optional)
         String of the SOM topology, topologies within MiniSom are supported
         so far this is only 'retangular' and 'hexagonal'
-
     Returns
     -------
     nm_node_data : nested dict
@@ -303,9 +300,7 @@ def organize_som_data(som, input_samples, variable_names, variable_scalers, vari
                     'quanitzation_error' : quanitzation error of the SOM
                     'topographic_error' : topographic error of the SOM
                     'distortion_measure' : distortion measure of the SOM
-
     """
-    # Get weights from the SOM
     weights = som.get_weights()  # shape=(grid_x, grid_y, features)
 
     # Build mapping of sample indices -> node coordinates
@@ -323,20 +318,10 @@ def organize_som_data(som, input_samples, variable_names, variable_scalers, vari
 
     som_err_metrics = {}
     try:
-        # Quantization Error
-        # Average distance between each sample and its BMU
         som_err_metrics['quantization_error'] = som.quantization_error(input_samples)
-        
-        # Topographic Error
-        # Measure of topology preservation (should be near 0 for good maps)
         som_err_metrics['topographic_error'] = som.topographic_error(input_samples)
-        
-        # Distortion Measure
-        # Measures the smoothness of the map weights relative to the data distribution
         som_err_metrics['distortion_measure'] = som.distortion_measure(input_samples)
-        
     except Exception as e:
-        # Handle cases where min_som methods might fail (e.g., small map size)
         print(f"Warning: Failed to calculate all SOM metrics. Error: {e}")
         som_err_metrics = {
             'quantization_error': np.nan, 
@@ -344,12 +329,11 @@ def organize_som_data(som, input_samples, variable_names, variable_scalers, vari
             'distortion_measure': np.nan
         }
 
-    # Dictionary to store node-wise data
     nm_node_data = {}
 
     for x in range(weights.shape[0]):
         for y in range(weights.shape[1]):
-            this_node_data = weights[x, y, :]  # flattened prototype vector
+            this_node_data = weights[x, y, :]
             this_node_data_dict = {}
 
             # === Split SOM prototype vector into variable sections ===
@@ -360,19 +344,10 @@ def organize_som_data(som, input_samples, variable_names, variable_scalers, vari
                 variable_data = this_node_data[start_scaled:end_scaled]
                 this_node_data_dict[var_name + "_scaled"] = variable_data
 
-                # Get scalers for samples mapped to this node
+                # Index directly into variable_scalers array position to support any variable name
                 node_samples = samples_in_nodes[(x, y)]
-                if len(node_samples) > 0:
-                    if var_name == "intensity":
-                        node_scalers = variable_scalers[0][node_samples]
-                    elif var_name == "neg2d_intensity":
-                        node_scalers = variable_scalers[1][node_samples]
-                    elif var_name == "mass_axes":
-                        node_scalers = variable_scalers[2][node_samples]
-                    elif var_name == "tof_axes":
-                        node_scalers = variable_scalers[3][node_samples]
-
-                    # Reconstruct SOM prototype in original space
+                if len(node_samples) > 0 and i < len(variable_scalers):
+                    node_scalers = variable_scalers[i][node_samples]
                     variable_data_inverse = RowMinMaxScaler.inverse_node_weight(
                         variable_data, node_scalers, aggregate="median"
                     )
@@ -388,7 +363,6 @@ def organize_som_data(som, input_samples, variable_names, variable_scalers, vari
             this_node_data_dict['xx'] = xx[x, y]
             this_node_data_dict['yy'] = yy[x, y]
 
-            # Add sample indices mapped to this node
             this_node_data_dict['node_samples'] = np.array(samples_in_nodes[(x, y)])
 
             nm_node_data[(x, y)] = this_node_data_dict
@@ -412,7 +386,7 @@ def process_som_weight_peaks(nm_node_data, nm,
     """
     Fits peaks contained within the weight vector of each node and optionally
     creates a plot of SOM weights
-
+    
     Parameters
     ----------
     all_node_data : dict
@@ -433,7 +407,6 @@ def process_som_weight_peaks(nm_node_data, nm,
         If True, generate/save the SOM weight plot. If False, skip plotting but still fit peaks.
     verbose : bool
         If True, print extra debug commands to the console
-
     Returns
     -------
     all_som_peaks : dict
@@ -447,14 +420,11 @@ def process_som_weight_peaks(nm_node_data, nm,
         base_fig_size = 24
         fig = plt.figure(figsize=(base_fig_size, base_fig_size), dpi=600)
 
-        # --- Extract SOM node positions ---
         xx_vals = np.array([v['xx'] for v in nm_node_data.values()])
         yy_vals = np.array([v['yy'] for v in nm_node_data.values()])
 
-        # Side length assuming n by n SOM
         n_side = int(len(xx_vals) ** 0.5)
 
-        # Set text size to tested values given the some size
         if n_side == 2:
             vertical_spacing_scale = 0.66
             textsize = 25
@@ -470,60 +440,51 @@ def process_som_weight_peaks(nm_node_data, nm,
         elif n_side == 6:
             vertical_spacing_scale = 0.97
             textsize = 10
-        elif n_side == 7:
+        elif n_side >= 7:
             vertical_spacing_scale = 1
-            textsize = 8
-        elif n_side == 8:
-            vertical_spacing_scale = 1
-            textsize = 6
-        elif n_side == 9:
-            vertical_spacing_scale = 1
-            textsize = 4
-        else:
-            vertical_spacing_scale = 1
-            textsize = 4
+            textsize = max(4, 12 - n_side)
 
-
-        # Normalize to [0,1] figure coordinates
-        x_norm = (xx_vals - xx_vals.min()) / (xx_vals.max() - xx_vals.min())
-        y_norm = (yy_vals - yy_vals.min()) / (yy_vals.max() - yy_vals.min())
+        x_norm = (xx_vals - xx_vals.min()) / (xx_vals.max() - xx_vals.min()) if xx_vals.max() > xx_vals.min() else np.zeros_like(xx_vals)
+        y_norm = (yy_vals - yy_vals.min()) / (yy_vals.max() - yy_vals.min()) if yy_vals.max() > yy_vals.min() else np.zeros_like(yy_vals)
         y_norm *= vertical_spacing_scale
 
-        # --- Compute adaptive subplot size ---
         coords = np.column_stack([x_norm, y_norm])
         dists = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
         np.fill_diagonal(dists, np.inf)
-        min_dist = np.min(dists)
+        min_dist = np.min(dists) if np.min(dists) != np.inf else 0.2
 
         subplot_size = spacing_scale * min_dist
 
-        # --- Colormap normalization ---
         sum_u_values = [v['sum_u_matrix'] for v in nm_node_data.values()]
-        u_norm = Normalize(vmin=np.min(sum_u_values), vmax=np.max(sum_u_values))
+        u_min, u_max = np.min(sum_u_values), np.max(sum_u_values)
+        u_norm = Normalize(vmin=u_min, vmax=u_max if u_max > u_min else u_min + 1e-6)
         u_cmap = plt.cm.viridis
 
         cluster_labels = [v['cluster_label'] for v in nm_node_data.values()]
-        c_norm = Normalize(vmin=min(cluster_labels), vmax=max(cluster_labels))
+        c_min, c_max = min(cluster_labels), max(cluster_labels)
+        c_norm = Normalize(vmin=c_min, vmax=c_max if c_max > c_min else c_min + 1)
         c_cmap = plt.cm.nipy_spectral
 
     # --- Iterate over SOM nodes ---
     for idx, ((i, j), node) in enumerate(nm_node_data.items()):
-        # Select peak function
         peak_func = peak_function_selector(peak_type, custom_shape=custom_shape)
-        node_peaks = []
 
-        node_mass_axis = node['mass_axes_inverse']
-        node_tof_axis = node['tof_axes_inverse']
-        node_intensity_axis = node['intensity_inverse']
-        node_neg2d_intensity_axis = node['neg2d_intensity_inverse']
+        # Robust dictionary key access for variable variants
+        node_mass_axis = node.get('mass_axes_inverse') if node.get('mass_axes_inverse') is not None else node.get('mass_axis_inverse')
+        node_tof_axis = node.get('tof_axes_inverse') if node.get('tof_axes_inverse') is not None else node.get('tof_axis_inverse')
+        node_intensity_axis = node.get('intensity_inverse')
+        node_neg2d_intensity_axis = node.get('neg2d_intensity_inverse')
+
+        # Safeguard against unassigned/empty SOM nodes
+        if node_mass_axis is None or node_intensity_axis is None or len(node_mass_axis) == 0:
+            nm_node_data[(i, j)]['weight_peaks'] = pd.DataFrame()
+            continue
 
         if verbose:
-            print(f"node_mass_axis is: {node_mass_axis}")
-            print(f"node_tof_axis is: {node_tof_axis}")
-            print(f"node_intensity_axis is: {node_intensity_axis}")
-            print(f"node_neg2d_intensity_axis is: {node_neg2d_intensity_axis}")
+            print(f"node_mass_axis: {node_mass_axis}")
+            print(f"node_tof_axis: {node_tof_axis}")
+            print(f"node_intensity_axis: {node_intensity_axis}")
 
-        # --- Fit peaks (always done, even if plot_flag=False) ---
         min_separation = peak_width_function(nm)
 
         node_fr = multi_overlap_peak_fit(
@@ -539,18 +500,27 @@ def process_som_weight_peaks(nm_node_data, nm,
             verbose=verbose,
         )
 
-        unpack_fit_result(node_fr, node_peaks, f"({i},{j})", nm)
-        node_all_peaks = pd.DataFrame(node_peaks)
+        # Unpack peaks without throwing key errors on nested noise_dict metrics
+        node_peaks = []
+        if node_fr is not None and isinstance(node_fr, dict) and 'peaks' in node_fr:
+            for peak in node_fr['peaks']:
+                node_peaks.append({
+                    'peak_center_mass': peak.get('center_mass'),
+                    'peak_center_tof': peak.get('center_tof'),
+                    'amplitude': peak.get('amplitude'),
+                    'fwhm_mass': peak.get('fwhm_mass'),
+                    'fwhm_tof': peak.get('fwhm_tof'),
+                    'area': peak.get('area')
+                })
 
+        node_all_peaks = pd.DataFrame(node_peaks)
         nm_node_data[(i, j)]['weight_peaks'] = node_all_peaks
 
-        # --- Plotting (only if enabled) ---
+        # --- Plotting ---
         if plot_flag:
-            # Node position in normalized coordinates
             x = x_norm[idx]
             y = y_norm[idx]
 
-            # Create subplot anchored to (x,y)
             ax = fig.add_axes([
                 x - subplot_size/2,
                 y - subplot_size/2,
@@ -558,48 +528,40 @@ def process_som_weight_peaks(nm_node_data, nm,
                 subplot_size
             ])
 
-            # Background color from U-matrix
             umatrix_val_at_node = node['sum_u_matrix']
             background_color = list(u_cmap(u_norm(umatrix_val_at_node)))
             background_color[-1] = 0.4
             activation_val = int(node['activation_response'])
 
-            # Raw intensities
-            ax.plot(node_mass_axis, node_neg2d_intensity_axis,
-                    label='Node Neg2D Intensity', linestyle="dashdot", color='dimgray', zorder=1)
+            if node_neg2d_intensity_axis is not None:
+                ax.plot(node_mass_axis, node_neg2d_intensity_axis,
+                        label='Node Neg2D Intensity', linestyle="dashdot", color='dimgray', zorder=1)
             ax.plot(node_mass_axis, node_intensity_axis,
                     label='Node Intensity', color='black', zorder=1)
 
-            # Plot fitted peaks
-            reconstructed = np.zeros_like(node_mass_axis)
-            for _, peak in node_all_peaks.iterrows():
-                if peak_type == "pseudo_voigt":
-                    peak_curve = peak_func(
-                        node_mass_axis,
-                        peak["amplitude"],
-                        peak["peak_center_mass"],
-                        peak["fwhm_mass"],
-                        0.5
-                    )
-                else:
-                    peak_curve = peak_func(
-                        node_mass_axis,
-                        peak["amplitude"],
-                        peak["peak_center_mass"],
-                        peak["fwhm_mass"]
-                    )
-                ax.plot(node_mass_axis, peak_curve,
-                        label=f'{np.round(peak["peak_center_mass"], 5)}', zorder=3)
-                ax.axvline(peak["peak_center_mass"], color='gray',
-                           linestyle="--", linewidth=0.5)
-                reconstructed += peak_curve
+            # Draw fitted peak profiles safely
+            if not node_all_peaks.empty:
+                reconstructed = np.zeros_like(node_mass_axis)
+                for _, peak in node_all_peaks.iterrows():
+                    c_mass = peak.get('peak_center_mass')
+                    if c_mass is None or pd.isna(c_mass):
+                        continue
+                    amp = peak.get('amplitude', 0)
+                    fwhm = peak.get('fwhm_mass', 0.03)
 
-            # Background coloring
+                    if peak_type == "pseudo_voigt":
+                        peak_curve = peak_func(node_mass_axis, amp, c_mass, fwhm, 0.5)
+                    else:
+                        peak_curve = peak_func(node_mass_axis, amp, c_mass, fwhm)
+
+                    ax.plot(node_mass_axis, peak_curve,
+                            label=f'{np.round(c_mass, 5)}', zorder=3)
+                    ax.axvline(c_mass, color='gray', linestyle="--", linewidth=0.5)
+                    reconstructed += peak_curve
+
             ax.set_facecolor(background_color)
-
             ax.tick_params(labelsize=textsize)
 
-            # Activation response annotation
             ax.text(
                 0.8, 0.9, f"AR={activation_val}",
                 transform=ax.transAxes,
@@ -608,12 +570,11 @@ def process_som_weight_peaks(nm_node_data, nm,
                 bbox=dict(boxstyle="round,pad=0.2", fc="none", ec="none", alpha=0)
             )
 
-            # Transparent legend
             leg = ax.legend(fontsize=textsize)
-            leg.get_frame().set_facecolor("none")
-            leg.get_frame().set_alpha(0)
+            if leg:
+                leg.get_frame().set_facecolor("none")
+                leg.get_frame().set_alpha(0)
 
-            # Cluster rectangle
             cluster_color = c_cmap(c_norm(node['cluster_label']))
             x_min, x_max = ax.get_xlim()
             y_min, y_max = ax.get_ylim()
@@ -628,10 +589,9 @@ def process_som_weight_peaks(nm_node_data, nm,
             )
             ax.add_patch(rect)
 
-    # --- Save figure if plotting ---
     if plot_flag:
-        plot_name = f"{plot_subdir}_{nm}_SOM_weights.png" if plot_subdir else f"{nm}_SOM_weights.png"
-        plt.savefig(os.path.join(output_dir, plot_name), bbox_inches="tight")
+        plot_name = f"{nm}_SOM_weights.png" 
+        plt.savefig(os.path.join(output_dir, plot_subdir, plot_name), bbox_inches="tight")
         plt.clf()
         plt.close()
 
