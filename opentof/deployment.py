@@ -1,4 +1,7 @@
 # deployment.py
+
+from __future__ import annotations
+
 import glob
 import h5py
 import numpy as np
