@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentof"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenTof: A package for Time-of-Flight mass spectrometry data analysis"
 readme = "README.md"
 requires-python = ">=3.12"
