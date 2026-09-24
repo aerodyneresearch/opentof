@@ -71,11 +71,11 @@ class Deployment:
     instrument_type : str or None
         Detected instrument configuration string (e.g., ``"SingleSegment"`` or ``"MultiSegment"``).
     calibration : dict or None
-        Mass calibration results dictionary returned by :meth:`mass_calibration`.
+        Mass calibration results dictionary returned by `mass_calibration`
     reference : dict or None
-        Reference spectrum results dictionary returned by :meth:`determine_reference_spectrum`.
+        Reference spectrum results dictionary returned by `determine_reference_spectrum`.
     baseline : dict or None
-        Baseline evaluation results dictionary returned by :meth:`determine_baseline`.
+        Baseline evaluation results dictionary returned by `determine_baseline`.
     peak_shape_interp : scipy.interpolate.interp1d or None
         1D cubic spline interpolator representing the empirical peak shape.
     custom_peak_shape : callable or None
@@ -287,6 +287,7 @@ class Deployment:
 
         print("Step 1/6: Loading .h5 files")
         # Loop through discovered files and parse metadata
+        file_nbr_samples = {}
         for idx, file in enumerate(files):
             try:
                 h5, timestamps, shape, sort_idx = cls._load_and_parse_h5(file, idx)
@@ -313,32 +314,36 @@ class Deployment:
                 
                 # Record sample channel counts across files
                 if 'NbrSamples' in h5.attrs:
-                    ns = int(cls._get_scalar_attr(h5, 'NbrSamples'))
-                    nbr_samples_list.append(ns)
+                    file_nbr_samples[file] = int(cls._get_scalar_attr(h5, 'NbrSamples'))
 
-                target_nbr_samples = None
-                if nbr_samples_list:
-                    min_samples = min(nbr_samples_list)
-                    max_samples = max(nbr_samples_list)
-
-                    # Warn if sample counts vary across files and require truncation
-                    if ns != max_samples:
-                        if not warning_already_printed:
-                            print(f"[WARNING] The 'NbrSamples' is inconsistent between files within the requested directory.")
-                            warning_already_printed = True
-                        print(f"{file} has {ns} 'NbrSamples' which is longer than: {min_samples} 'NbrSamples'. Excess will be truncated down to this length.")
-
-                    # Enforce safety check to prevent merging fundamentally mismatched datasets
-                    if max_samples > 2 * min_samples:
-                        raise ValueError(
-                            f"Fatal mismatch in NbrSamples across files. "
-                            f"Max NbrSamples ({max_samples}) is more than twice the min NbrSamples ({min_samples}) accross all files. "
-                            f"Check that the input files are from the same instrument or configuration. "
-                        )
-                    target_nbr_samples = min_samples
             except (KeyError, Exception) as e:
                 print(f"⚠️ Warning: Skipping file {file}.")
                 continue
+
+        # Evaluate NbrSamples across all files after completing directory scan
+        target_nbr_samples = None
+        if file_nbr_samples:
+            nbr_samples_list = list(file_nbr_samples.values())
+            min_samples = min(nbr_samples_list)
+            max_samples = max(nbr_samples_list)
+
+            # Enforce safety check to prevent merging fundamentally mismatched datasets
+            if max_samples > 2 * min_samples:
+                raise ValueError(
+                    f"Fatal mismatch in NbrSamples across files. "
+                    f"Max NbrSamples ({max_samples}) is more than twice the min NbrSamples ({min_samples}) across all files. "
+                    f"Check that the input files are from the same instrument or configuration."
+                )
+
+            # Warn if sample counts vary across files and report which files actually exceed min_samples
+            if min_samples != max_samples:
+                print("[WARNING] The 'NbrSamples' is inconsistent between files within the requested directory.")
+                for file_path, ns in file_nbr_samples.items():
+                    if ns > min_samples:
+                        print(f"{file_path} has {ns} 'NbrSamples' which is longer than: {min_samples} 'NbrSamples'. Excess will be truncated down to this length.")
+
+            target_nbr_samples = min_samples
+
 
         # Instantiate Deployment container with parsed file handles and parameters
         obj = cls(file_handles, file_timestamps, file_shapes, sort_indices, target_nbr_samples, chunk_size, segment_profiles, reagent_ion, plot_dir=plot_dir)
@@ -1488,8 +1493,8 @@ class Deployment:
         # Configure keyword argument overrides for downstream plotting routines
         kwargs['output_dir'] = output_dir
         kwargs['show_plot_flag'] = show_plot_flag
-        kwargs['mc_summary_plot_name'] = "mc_summary.png"
-        kwargs['tof_drift_plot_name'] = "tof_drift.png"
+        kwargs.setdefault('mc_summary_plot_name', "mc_summary.png")
+        kwargs.setdefault('tof_drift_plot_name', "tof_drift.png")
 
         # --- STEP 1: DETECT AND RECONSTRUCT IMPORTED MASS CALIBRATION PARAMETERS ---
         # If calibration data was imported from Tofware/IF files, bypass fitting optimization
@@ -3114,9 +3119,76 @@ class Deployment:
         self.diagnostic_fits[f"unconstrained_{nominal_mass}"] = result
         return result
 
+    def integrate_UMR(self, nm_list=None, nm_search_range=0.5, 
+                  merge_to_peak_data=True, verbose=True) -> Deployment:
+        """
+        Numerically integrate baseline-subtracted signal within nominal mass bounds across time.
+
+        Parameters
+        ----------
+        nm_list : sequence of int, tuple of (int, int), or None, default=None
+            Target nominal masses to integrate.
+            - If None (default): Automatically detects all available nominal masses 
+            spanned by `self.first_guess_mass_axis`.
+            - If tuple (min_nm, max_nm): Integrates all integer nominal masses in that range.
+            - If list/array: Integrates the specific listed nominal masses.
+        nm_search_range : float, default=0.5
+            Half-width window around each nominal mass integer ([NM - Δ, NM + Δ]).
+        merge_to_peak_data : bool, default=True
+            If True, merges resulting UMR columns into `self.peak_data` on `MS_index`.
+        verbose : bool, default=True
+            If True, displays Dask progress bars.
+
+        Returns
+        -------
+        self : Deployment
+            Updated Deployment instance with UMR signal columns added to `self.peak_data`.
+        """
+        if getattr(self, 'calibration', None) is None:
+            raise ValueError("Mass calibration not run. Call `mass_calibration()` first.")
+        if getattr(self, 'tofdata_subtracted', None) is None:
+            raise ValueError("Baseline profile not determined. Call `determine_baseline()` first.")
+
+        # --- Flexible Nominal Mass Selection ---
+        if nm_list is None:
+            if getattr(self, 'first_guess_mass_axis', None) is None:
+                raise ValueError("`first_guess_mass_axis` is None. Cannot auto-detect nominal masses.")
+            
+            # Auto-discover all available integer nominal masses across the detector axis
+            nm_list = np.unique(np.round(self.first_guess_mass_axis)).astype(int)
+            
+        elif isinstance(nm_list, tuple) and len(nm_list) == 2:
+            # User passed a range tuple like (10, 500)
+            nm_list = list(range(int(nm_list[0]), int(nm_list[1]) + 1))
+        else:
+            # User passed an explicit list or array
+            nm_list = [int(x) for x in nm_list]
+
+        from opentof.peak_fitting import full_umr_integration
+
+        umr_df = full_umr_integration(
+            tofdata_subtracted=self.tofdata_subtracted,
+            calibration_results=self.calibration,
+            sample_index_axis=self.sample_index_axis,
+            tof_axis=self.tof_axis,
+            nm_list=nm_list,
+            nm_search_range=nm_search_range,
+            chunk_size=self.chunk_size,
+            verbose=verbose
+        )
+
+        if merge_to_peak_data:
+            if self.peak_data is None:
+                self.peak_data = umr_df
+            else:
+                # Merge left on MS_index to keep all existing high-res peak_data rows intact
+                self.peak_data = pd.merge(self.peak_data, umr_df, on="MS_index", how="left")
+
+        return self
+
     # TODO: Maybe make a function that populates all nominal masses with this/a similar method? 
     # -> This would take a while currently so maybe its best to dissuade users from this
-    # but keep the method in case they want to make something custom
+    # but keep the method in case they want to make something custom?
     def populate_nm_data_for(self, nominal_mass, force_non_subtracted=False, **kwargs) -> Deployment:
         """
         Extract intensity segment data for a specific nominal mass across all spectra.
@@ -3892,7 +3964,7 @@ class Deployment:
         return nm_node_data, som_err_metrics, som
 
 
-    def export_to_h5(self, output_dir=None, driver="PIF") -> Deployment:
+    def export_to_h5(self, output_dir=None, filename=None, driver="PIF") -> Deployment:
         """
         Export workspace state, mass calibrations, baselines, and peak shapes to HDF5 files.
 
@@ -3930,7 +4002,7 @@ class Deployment:
 
         # Route export request to corresponding private serializer backend
         if driver == "OT":
-            return self._export_ot(output_dir)
+            return self._export_ot(output_dir=output_dir, filename=filename)
         elif driver == "P":
             return self._export_p(output_dir)
         elif driver == "IF":
@@ -4000,7 +4072,7 @@ class Deployment:
     # =========================================================================
     # EXPORT HELPERS
     # =========================================================================
-    def _export_ot(self, output_dir):
+    def _export_ot(self, output_dir=None, filename=None):
         """
         Private helper to serialize complete Deployment workspace state into a native OpenTof HDF5 file.
 
@@ -4028,13 +4100,24 @@ class Deployment:
         if output_dir is None:
             raise ValueError("An explicit destination path or folder must be provided for 'OT' mode.")
         
-        # Resolve target output file path (defaulting to 'opentof_deployment.h5' if directory path is passed)
-        path_obj = Path(output_dir)
-        if path_obj.is_dir() or path_obj.suffix != ".h5":
-            out_filepath = path_obj / "opentof_deployment.h5"
+        if output_dir is None:
+            out_filepath = Path(filename)
         else:
-            out_filepath = path_obj
-            
+            path_obj = Path(output_dir)
+            if filename:
+                # Combine directory and filename
+                parent_dir = path_obj.parent if path_obj.suffix == ".h5" else path_obj
+                out_filepath = parent_dir / filename
+            elif path_obj.suffix == ".h5":
+                # Direct filepath was passed as output_dir
+                out_filepath = path_obj
+            else:
+                # Fallback to default directory structure
+                out_filepath = path_obj / "opentof_deployment.h5"
+
+        if not out_filepath.name.endswith(".h5"):
+            out_filepath = out_filepath.with_suffix(".h5")
+
         out_filepath.parent.mkdir(parents=True, exist_ok=True)
         print(f"Saving OpenTof deployment state to: {out_filepath}")
 
@@ -4071,7 +4154,11 @@ class Deployment:
             if self.plot_dir is not None:
                 f.attrs["plot_dir"] = str(self.plot_dir)
             if self.segment_profiles is not None:
-                f.attrs["segment_profiles"] = json.dumps(self.segment_profiles)
+                clean_profiles = {
+                    k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                    for k, v in self.segment_profiles.items()
+                }
+                f.attrs["segment_profiles"] = json.dumps(clean_profiles)
 
             # Serialize raw peak width floor coefficients and corruption tracking flags
             if getattr(self, 'raw_peak_width_coeffs', None) is not None:

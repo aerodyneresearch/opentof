@@ -52,6 +52,7 @@ from opentof.peak_fitting import (
     full_fitting_integration_unconstrained,
     full_fitting_integration_constrained,
     fit_partially_constrained_nm,
+    full_umr_integration,
 )
 
 from opentof.isotopes import (
@@ -153,6 +154,7 @@ __all__ = [
     "fit_unconstrained_peaks",
     "full_fitting_integration_constrained",
     "fit_partially_constrained_nm",
+    "full_umr_integration",
     "peak_width",
     "ransac_peak_width",
     "peak_shape",
