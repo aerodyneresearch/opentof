@@ -3345,6 +3345,217 @@ class Deployment:
 
         return ppb_bc, sens_axis, bg_corr, working_arr
 
+    def synthesize_cycling_status(self, 
+                                  overwrite=False,
+                                  min_ambient_points=30,
+                                  zero_mfc_thresh=50.0, 
+                                  cal_mfc_thresh=1.0, 
+                                  plot_flag=True, 
+                                  output_dir=None, 
+                                  plot_filename="deployment_cycling.png"):
+        """
+        Reconstruct d.cycling_status['type'] and d.standard_acquisition_data using
+        MFC flow monitors and valve target telemetry from TPS2.
+
+        Includes run-length filtering to eliminate transient 'ambient' blips (1-point
+        dropouts or valve-switching chatter) by absorbing them into the surrounding
+        non-standard cycling phases.
+
+        Parameters
+        ----------
+        overwrite : bool, default=False
+            If False and the deployment already has valid cycling flags (type 1 or 4),
+            synthesis is skipped to protect ground truth data.
+        min_ambient_points : int, default=30
+            Minimum number of consecutive spectra required to qualify as legitimate
+            ambient acquisition data. Any run of status == 0 shorter than this threshold
+            is disallowed and absorbed into the adjacent cycling events.
+        zero_mfc_thresh : float, default=50.0
+            Minimum flow (sccm) on the Zero MFC to classify as active zero air overflow.
+        cal_mfc_thresh : float, default=1.0
+            Minimum flow (sccm) on the Cal MFC to classify as active calibration challenge.
+        plot_flag : bool, default=True
+            If True, saves a 2-panel verification plot of the cycle status and flows.
+        output_dir : str or None, default=None
+            Target directory for the plot. Defaults to OpenTof default plot dir.
+        plot_filename : str, default="deployment_cycling.png"
+            Filename for the exported diagnostic plot.
+
+        Returns
+        -------
+        self : Deployment
+            The Deployment instance.
+        """
+        # --- 1. Ground Truth Protection Guardrail ---
+        current_type = getattr(self, 'cycling_status', {}).get('type', None)
+        has_existing_cycling = (
+            current_type is not None and 
+            np.any(np.isin(current_type, [1, 4]))
+        )
+
+        if has_existing_cycling and not overwrite:
+            n_zeros = np.sum(current_type == 1)
+            n_cals = np.sum(current_type == 4)
+            print(
+                f"ℹ️ Valid cycling table already present ({n_zeros} zero points, {n_cals} cal points). "
+                f"Skipping synthesis. Pass `overwrite=True` if you wish to re-derive from flows/valves."
+            )
+            return self
+
+        # --- 2. Telemetry Availability Guard ---
+        if not hasattr(self, 'tps2') or not self.tps2:
+            warnings.warn("No TPS2 telemetry found in deployment. Cannot synthesize cycling status.")
+            return self
+
+        n_spectra = len(self.timestamps)
+        status = np.zeros(n_spectra, dtype=np.int32)
+
+        # --- 3. Extract Mass Flow Controller Monitors from TPS2 ---
+        zero_flow = None
+        cal_flow = None
+        for k in self.tps2.keys():
+            k_low = k.lower()
+            if 'mfc' in k_low:
+                if 'zero' in k_low and zero_flow is None:
+                    zero_flow = np.asarray(self.tps2[k], dtype=float)
+                elif 'cal' in k_low and cal_flow is None:
+                    cal_flow = np.asarray(self.tps2[k], dtype=float)
+
+        # --- 4. Extract Valve Target State Commands ---
+        cal_valve = None
+        zero_valve = None
+        for k in self.tps2.keys():
+            k_low = k.lower()
+            if 'valve' in k_low:
+                if 'pr1' in k_low or 'cal' in k_low:
+                    cal_valve = (np.asarray(self.tps2[k]) == 1)
+                elif 'pr2' in k_low or 'zero' in k_low:
+                    zero_valve = (np.asarray(self.tps2[k]) == 1)
+
+        # --- 5. Establish Physical Active Flow Conditions ---
+        zero_flowing = (zero_flow > zero_mfc_thresh) if (zero_flow is not None and len(zero_flow) == n_spectra) else True
+        cal_flowing = (cal_flow > cal_mfc_thresh) if (cal_flow is not None and len(cal_flow) == n_spectra) else True
+
+        # Phase 4 (Sensitivity Cal Challenge): Cal gas flowing & cal valve open
+        if cal_valve is not None:
+            is_cal = cal_valve & cal_flowing
+        elif cal_flow is not None:
+            is_cal = cal_flow > cal_mfc_thresh
+        else:
+            is_cal = np.zeros(n_spectra, dtype=bool)
+
+        # Phase 1 (Auto-Zero Air): Zero air flowing & zero valve open, with Cal gas OFF
+        if zero_valve is not None:
+            is_zero = (zero_valve & zero_flowing) & ~is_cal
+        elif zero_flow is not None:
+            is_zero = (zero_flow > zero_mfc_thresh) & ~is_cal
+        else:
+            is_zero = np.zeros(n_spectra, dtype=bool)
+
+        status[is_zero] = 1
+        status[is_cal] = 4
+
+        # --- 6. RUN-LENGTH FILTER: ABSORB SHORT TRANSIENT AMBIENT RUNS ---
+        # Any stretch of status == 0 shorter than min_ambient_points is an artifact
+        if min_ambient_points > 1:
+            i = 0
+            absorbed_blips = 0
+            while i < n_spectra:
+                if status[i] == 0:
+                    start = i
+                    while i < n_spectra and status[i] == 0:
+                        i += 1
+                    end = i
+                    run_len = end - start
+
+                    # If the ambient period is too short, bridge it into the surrounding cycle
+                    if run_len < min_ambient_points:
+                        absorbed_blips += 1
+                        prev_val = status[start - 1] if start > 0 else None
+                        next_val = status[end] if end < n_spectra else None
+
+                        if prev_val is not None and next_val is not None:
+                            if prev_val == next_val:
+                                # Bridge across single-point dips during zero air or cal
+                                status[start:end] = prev_val
+                            else:
+                                # Transition between Zero and Cal: split at midpoint
+                                mid = start + (run_len // 2)
+                                status[start:mid] = prev_val
+                                status[mid:end] = next_val
+                        elif prev_val is not None:
+                            # Transient blip at the very end of deployment
+                            status[start:end] = prev_val
+                        elif next_val is not None:
+                            # Startup chatter at the beginning of deployment
+                            status[start:end] = next_val
+                else:
+                    i += 1
+
+            # # Debug
+            # if absorbed_blips > 0:
+                # print(f"Cleaned up {absorbed_blips} transient ambient blip(s) (< {min_ambient_points} points).")
+
+        # --- 7. Backup & State Assignment ---
+        if getattr(self, '_cycling_status', None) is None:
+            self._cycling_status = {}
+        elif 'type' in self._cycling_status and getattr(self, '_original_cycling_status', None) is None:
+            self._original_cycling_status = self._cycling_status['type'].copy()
+
+        self._cycling_status['type'] = status
+        
+        # Ambient acquisition should now have no runs shorter than min_ambient_points
+        self.standard_acquisition_data = (status == 0)
+
+        n_zero_pts = np.sum(status == 1)
+        n_cal_pts = np.sum(status == 4)
+        n_amb_pts = np.sum(status == 0)
+        print(f"Cycling status synthesis found: {n_zero_pts} zero points, {n_cal_pts} cal points, {n_amb_pts} ambient points.")
+
+        # --- 8. Diagnostic Verification Plot ---
+        if plot_flag:
+            from opentof.utils import get_default_plot_dir, ensure_dir
+            if output_dir is None:
+                base_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
+                output_dir = os.path.join(base_dir, self.default_plot_subdir)
+            ensure_dir(output_dir)
+
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, 
+                figsize=(12, 6), 
+                sharex=True, 
+                dpi=150, 
+                gridspec_kw={'height_ratios': [1, 2]}
+            )
+
+            # Subplot 1: Cleaned Phase Timeline
+            ax1.plot(self.timestamps, status, color='indigo', lw=1.2)
+            ax1.set_ylabel("Cycle Phase", fontweight='bold')
+            ax1.set_yticks([0, 1, 4])
+            ax1.set_yticklabels(["0 (Ambient)", "1 (Zero)", "4 (Cal)"])
+            ax1.grid(True, alpha=0.3, linestyle="--")
+            ax1.set_title(f"Synthesized Cycling Status (Filtered: min ambient stretch = {min_ambient_points} pts)")
+
+            # Subplot 2: Physical Flows Supporting the Assignment
+            if zero_flow is not None:
+                ax2.plot(self.timestamps, zero_flow, color='blue', alpha=0.7, label='Zero MFC [sccm]')
+            if cal_flow is not None:
+                ax2_twin = ax2.twinx()
+                ax2_twin.plot(self.timestamps, cal_flow, color='crimson', alpha=0.8, label='Cal MFC [sccm]')
+                ax2_twin.set_ylabel("Cal MFC (sccm)", color='crimson', fontweight='bold')
+                ax2_twin.tick_params(axis='y', labelcolor='crimson')
+
+            ax2.set_ylabel("Zero MFC (sccm)", color='blue', fontweight='bold')
+            ax2.tick_params(axis='y', labelcolor='blue')
+            ax2.set_xlabel("Time (UTC)")
+            ax2.grid(True, alpha=0.3, linestyle="--")
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, plot_filename), bbox_inches='tight')
+            plt.close()
+
+        return self
+
     # TODO: Maybe make a function that populates all nominal masses with this/a similar method? 
     # -> This would take a while currently so maybe its best to dissuade users from this
     # but keep the method in case they want to make something custom?

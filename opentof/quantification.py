@@ -720,9 +720,10 @@ def _get_cyclic_sensitivity_calibrations(sens_cal_blocks,
             else:
                 info['status'] = 'skipped_outlier'
                 cal_diagnostics.append(info)
-                warnings.warn(
-                    f"Cal block {b_id} (sens={info['sens']:.4f}) rejected as a cross-block outlier."
-                )
+                # # Victor Note: Commented out the warning to reduce verbosity in normal operation. Can be re-enabled if needed.
+                # warnings.warn(
+                #     f"Cal block {b_id} (sens={info['sens']:.4f}) rejected as a cross-block outlier."
+                # )
     else:
         valid_centers = raw_centers
         valid_sens = raw_sens
@@ -784,7 +785,7 @@ def quantify_signal(peak_area_array, cycling_dict=None,
       - Valve switching and inlet line flushing transients are trimmed from calculations.
       - Compounds not in the calibration standard (delta_signal < min_signal_delta) are
         bypassed to avoid dividing by near-zero noise.
-      - Deployments lacking cycling telemetry (flags all -1) gracefully fall back to 
+      - Deployments lacking cycling telemetry (flags all 0) gracefully fall back to 
         the user-specified `static_sens_factor` rather than multiplying by zero.
 
     Parameters
@@ -884,7 +885,8 @@ def quantify_signal(peak_area_array, cycling_dict=None,
     has_valid_cycling = (
         cycling_dict is not None and 
         'type' in cycling_dict and 
-        not (cycling_dict['type'] == -1).all()
+        # not (cycling_dict['type'] == -1).all()
+        not (cycling_dict['type'] == 0).all()
     )
     cycling_flags_type = cycling_dict['type'] if has_valid_cycling else np.full(len(working_array), -1)
 
