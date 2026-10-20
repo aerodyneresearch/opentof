@@ -514,7 +514,7 @@ More information regarding the process of defining the peak width function and a
 
 ### Deployment.determine_peak_shape
 
-Although we would love for peaks in the mass spectrum to follow a perfect gaussian shape, this is rarely the case, and as such, defining a custom instrument-specific peak shape can be benifitial for both refining the mass calibration and for more accurate integration of final peak areas.
+Although we would love for peaks in the mass spectrum to follow a perfect gaussian shape, this is rarely the case, and as such, defining a custom instrument-specific peak shape can be beneficial for both refining the mass calibration and for more accurate integration of final peak areas.
 
 To define an instrument specific peak shape using all default parameters it is only necessary to call:
 

@@ -3186,6 +3186,165 @@ class Deployment:
 
         return self
 
+    def quantify_signal(self, peak_target,
+                        cal_tank_conc=1000.0,
+                        zero_flow=None,
+                        cal_flow=None,
+                        static_sens_factor=1.0,
+                        mode="interp",
+                        cycling_zeros=True,
+                        cycling_sens_cals=True,
+                        normalization=False,
+                        normalization_reference=None,
+                        static_target_value=1e6,
+                        min_zero_points=5,
+                        min_cal_points=6,
+                        min_signal_delta=0.5,
+                        plot_flag=False,
+                        output_dir=None,
+                        plot_subdir="quantification_plots",
+                        **kwargs):
+        """
+        High-level wrapper to quantify a target peak into concentration units (ppb).
+        
+        This wrapper automates the retrieval of inputs required for the quantification backend.
+        It automatically extracts flow arrays from the Mass Flow Controllers (MFCs) in `self.tps2`, 
+        locates the integrated area of the target peak from `self.peak_data`, and feeds the 
+        instrument's cycling telemetry (`self.cycling_status`) into the processor.
+
+        Parameters
+        ----------
+        peak_target : str or numpy.ndarray
+            Compound formula string (e.g., 'C6H6+') found in `self.peak_data`, or a 1D signal array.
+        cal_tank_conc : float, default=1000.0
+            Concentration of calibration gas cylinder in ppbV.
+        zero_flow : float, array-like, or None, default=None
+            Dilution zero air flow (sccm). If None, auto-extracted from `self.tps2['Zero MFC monitor [sccm]']`.
+            Automatically pulls the correct median flow value recorded *during* the physical event.
+        cal_flow : float, array-like, or None, default=None
+            Calibration gas standard flow (sccm). If None, auto-extracted from `self.tps2['Cal MFC monitor [sccm]']`.
+        static_sens_factor : float, default=1.0
+            Fallback conversion factor used when cycling calibrations are absent or disabled.
+        mode : {'interp', 'median'}, default='interp'
+            Interpolation mode across time for zero subtraction and sensitivity calibration.
+            'interp' draws a line between event centers; 'median' applies a single global median.
+        cycling_zeros : bool, default=True
+            If True, locates auto-zero periods (type flag 1.0) to subtract dynamic backgrounds.
+        cycling_sens_cals : bool, default=True
+            If True, locates sensitivity cal periods (type flag 4.0) to calculate dynamic sensitivities.
+        normalization : bool, default=False
+            If True, normalizes peak areas against a primary reagent ion signal to combat source fluctuation.
+        normalization_reference : str or array-like, default=None
+            Formula string of reagent ion (e.g., 'I-') or an explicit 1D array of reference counts.
+        min_zero_points : int, default=5
+            Minimum number of sample points required to accept a zero block (rejects aborted cycles).
+        min_signal_delta : float, default=0.5
+            Minimum required signal response step (ions/s) to accept a calibration challenge block.
+            If the compound is not in the cal tank, this prevents dividing by noise.
+        plot_flag : bool, default=False
+            If True, exports diagnostic subplots for every zero and calibration block analyzed.
+
+        Returns
+        -------
+        ppb_bc : numpy.ndarray
+            1D array of final background-corrected and calibrated concentrations in ppb.
+        sens_axis : numpy.ndarray
+            1D array of dynamic or static sensitivity calibration factors applied.
+        bg_corr : numpy.ndarray
+            1D array of signal values after zero subtraction but before sensitivity scaling.
+        working_arr : numpy.ndarray
+            1D array of signal values prior to background subtraction (with normalization applied if requested).
+        """
+        from opentof.quantification import quantify_signal as backend_quantify
+        from opentof.utils import get_default_plot_dir
+
+        # --- 1. Resolve Target Signal ---
+        # Locate the peak area array from the fitted peak_data DataFrame
+        if isinstance(peak_target, str):
+            if self.peak_data is None:
+                raise ValueError("Deployment.peak_data is not populated. Run peak fitting first.")
+            col_area = f"{peak_target}_area"
+            col_amp = f"{peak_target}_amplitude"
+            if col_area in self.peak_data.columns:
+                signal_array = self.peak_data[col_area].to_numpy()
+            elif col_amp in self.peak_data.columns:
+                signal_array = self.peak_data[col_amp].to_numpy()
+            elif peak_target in self.peak_data.columns:
+                signal_array = self.peak_data[peak_target].to_numpy()
+            else:
+                raise KeyError(f"Peak '{peak_target}' not found in Deployment.peak_data columns.")
+        else:
+            # If the user passed in a custom numpy array directly
+            signal_array = np.asarray(peak_target, dtype=float)
+
+        # --- 2. Auto-Detect Flows from TPS2 Telemetry ---
+        # Find Mass Flow Controller (MFC) variables in the telemetry cache via substring matching
+        if zero_flow is None:
+            if hasattr(self, 'tps2') and self.tps2:
+                matched_zero = [k for k in self.tps2.keys() if 'zero' in k.lower() and 'mfc' in k.lower()]
+                if matched_zero:
+                    zero_flow = self.tps2[matched_zero[0]]
+            if zero_flow is None:
+                zero_flow = 250.0  # Fallback default
+
+        if cal_flow is None:
+            if hasattr(self, 'tps2') and self.tps2:
+                matched_cal = [k for k in self.tps2.keys() if 'cal' in k.lower() and 'mfc' in k.lower()]
+                if matched_cal:
+                    cal_flow = self.tps2[matched_cal[0]]
+            if cal_flow is None:
+                cal_flow = 5.0  # Fallback default
+
+        # --- 3. Resolve Normalization Reference ---
+        # Allow passing the formula string of the primary reagent ion (e.g., "I-")
+        norm_ref_vals = None
+        if normalization:
+            if isinstance(normalization_reference, str):
+                if self.peak_data is not None:
+                    col_ref = f"{normalization_reference}_area"
+                    col_ref_alt = f"{normalization_reference}_amplitude"
+                    if col_ref in self.peak_data.columns:
+                        norm_ref_vals = self.peak_data[col_ref].to_numpy()
+                    elif col_ref_alt in self.peak_data.columns:
+                        norm_ref_vals = self.peak_data[col_ref_alt].to_numpy()
+            elif normalization_reference is not None:
+                norm_ref_vals = np.asarray(normalization_reference)
+
+        # --- 4. Resolve Output Directories ---
+        if output_dir is None:
+            output_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
+        if plot_subdir is None:
+            plot_subdir = self.default_plot_subdir
+
+        # --- 5. Call Backend Code ---
+        ppb_bc, sens_axis, bg_corr, working_arr = backend_quantify(
+            peak_area_array=signal_array,
+            cycling_dict=getattr(self, 'cycling_status', None),
+            cycling_zeros=cycling_zeros,
+            cycling_sens_cals=cycling_sens_cals,
+            normalization=normalization,
+            normalization_reference_values=norm_ref_vals,
+            static_target_value=static_target_value,
+            cal_tank_conc=cal_tank_conc,
+            zero_flow=zero_flow,
+            cal_flow=cal_flow,
+            static_sens_factor=static_sens_factor,
+            mode=mode,
+            min_zero_points=min_zero_points,
+            min_cal_points=min_cal_points,
+            min_signal_delta=min_signal_delta,
+            plot_flag=plot_flag,
+            output_dir=output_dir,
+            plot_subdir=plot_subdir,
+            # Context arguments forwarded to plot_quantification_summary
+            timestamps=self.timestamps,
+            standard_acq_mask=self.standard_acquisition_data,
+            compound_name=peak_target if isinstance(peak_target, str) else "Target Peak",
+            **kwargs
+        )
+
+        return ppb_bc, sens_axis, bg_corr, working_arr
+
     # TODO: Maybe make a function that populates all nominal masses with this/a similar method? 
     # -> This would take a while currently so maybe its best to dissuade users from this
     # but keep the method in case they want to make something custom?
