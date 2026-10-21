@@ -10,36 +10,28 @@ Install OpenTof and all its dependencies directly via `pip`:
 pip install opentof
 ```
 
-## Installation (Local / Current Developers)
-If you previously used the old script setup, your environment is still completely valid. However, this procedure installs opentof as an editable local package. This allows you to edit the source code and see your changes instantly without rebuilding anything.
+See our installation guide: [installation](docs/getting-started/installation.md)!
 
-### Step 0: Clone the Repository
-```bash
-git clone https://github.com/aerodyneresearch/opentof.git 
-cd opentof
-```
+## Getting Started?
 
-### Step 1: Create and Activate your environment
-Open PowerShell in your repository root directory and run:
+- Overview of OpenTof's basic usage: [quickstart](docs/getting-started/quickstart.md)
+- A more in-depth overview of the primary `Deployment` class: [deployment](../opentof_repo/docs/)
+- Example jupyter notebook for PTR-TOF data: [demo_PTR.ipynb](examples/demo_PTR.ipynb)
+- More documentation coming soon!
 
-```bash
-python -m venv .venv
-```
-and
-```bash
-.\.venv\Scripts\activate
-```
+## OpenTof Automated Features Showcase:
 
-### Step 2: Clean up old installation (Existing Developers Only)
-If your environment has old package metadata floating around, clean it out first:
-```bash
-pip uninstall opentof
-```
+1. Mass calibration
+2. Window selection for reference spectrum
+3. Baseline determination
+4. Peak width
+5. Peak shape
+6. Full peak fitting and area integration
 
-### Step 3: Install in Editable Dev Mode
-From the repository root directory (where pyproject.toml lives), run:
-```bash
-pip install -e .
-```
+Example Output:
+![Final_Peak_Data](docs/assets/images/deployment_md/deployment_FFI_constrained.png)
 
-(Note: The -e flag stands for "editable". The . tells pip to look at the current directory's pyproject.toml. Pip will verify all dependencies and link your environment directly to your live opentof/ folder).
+## Contributing to OpenTof:
+
+- Contributions to OpenTof's source code is encouraged!
+- See [contributing](docs/contributing.md) for a description of eventual changes that would benefit the code!

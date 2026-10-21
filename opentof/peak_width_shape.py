@@ -537,8 +537,8 @@ def peak_shape(reference_spectrum,
                peak_smoothing=0, # Apply smoothing to found raw peak shapes (no smoothing by default)
                mean_smoothing=1.0, # Apply minor smoothing to the mean shape (can help with center disconinutity)
                cursor_position=8,
-               omega_r=0.70, # right side omega "apex tightness" parameter (higher = more aggressive)
-               omega_l=0.80, # left side omega "apex tightness" parameter (higher = more aggressive)
+               omega_r=0.70, # [0-1] right side omega "apex tightness" parameter (higher = more aggressive)
+               omega_l=0.80, # [0-1] left side omega "apex tightness" parameter (higher = more aggressive)
                # Try to get rid of "flat" peaks
                flatness_region=0.5, # σ range from center to check
                flatness_thresh=0.95, # Higher = more tolerant to flatness

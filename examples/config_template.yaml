@@ -17,13 +17,16 @@ data_inputs:
   chunk_size: 1000                    # Spectra chunk size for memory management
 
 data_outputs:
-  plot_dir: "./output/plots"
-  export_csv_path: "./output/processed_timeseries.csv"
   save_plots: true
   show_plot_flag: false        # Default: False (prevents popup windows)
   
-  # Optional: Save complete OpenTof state file for rapid loading later
-  # export_ot_h5_path: "./output/deployment_state.h5"
+  # --- OPTIONAL CUSTOM PATH OVERRIDES ---
+  # If left commented/omitted, all outputs (plots, CSV, state .h5, and JSON summary)
+  # are saved automatically to the run folder: ~/OpenTof/<YYYYMMDD_HHMMSS>/
+  #
+  # plot_dir: "E:/work_local_backup/h5madness/temp"
+  # export_csv_path: "E:/some/local/path/processed_csv.csv"
+  # export_ot_h5: "E:/some/local/path/processed_h5.h5"
 
 # ------------------------------------------------------------------------------
 # Core Workflow Hyper-Parameters
@@ -112,7 +115,7 @@ workflow_settings:
       C9H12H+: 1080.0
 
 # ------------------------------------------------------------------------------
-# Mass Calibration Targets List
+# Mass Calibration Calibrants List
 # ------------------------------------------------------------------------------
 calibrants:
   - "NO+"

@@ -22,7 +22,7 @@ OpenTof handles massive datasets and relies heavily on `dask` for out-of-core pr
     *   **Goal:** Maximize parallel CPU saturation, reduce memory bottlenecks during HDF5 I/O, and speed up the overall full-fitting integration pipeline.
 
 ### 2. Isotope Modeling
-The current implementation for handling isotopes in `isotopes.py` attempts to calculate isotope masses, convolve elemental distributions, and recreate these isotopic signatures in signal space for easy subtraction. However, we would love for domain experts and computational chemists to double-check this logic. 
+The current implementation for handling isotopes in `isotopes.py` attempts to calculate isotope masses, convolve elemental distributions, and recreate these isotopic signatures in signal space for easy subtraction. However, we would love for domain experts to double-check OpenTof's logic. 
 *   **Target Areas:** The `calculate_isotope_masses`, `convolve_distributions`, `isotope_signal_on_axis` and `reconstruct_total_isotope_signal` functions.
 *   **Goal:** Validate the accuracy against existing isotopic databases, optimize the convolution performance, and ensure the code gracefully handles extreme edge cases.
 
@@ -56,10 +56,5 @@ If you find a bug or have an idea for a new feature, please open an issue on our
 4. **Test your changes** to ensure they do not break existing functionality.
 5. **Commit your changes** with clear, descriptive commit messages.
 6. **Push to your fork** and submit a Pull Request against the `main` branch of the OpenTof repository.
-
-### Code Style Guidelines
-*   We follow standard Python PEP8 conventions.
-*   Please include docstrings for new functions, classes, and modules.
-*   Comment complex mathematical logic, particularly in the peak fitting and calibration modules, to help future maintainers understand the methodology.
 
 Thank you for helping make OpenTof better!
