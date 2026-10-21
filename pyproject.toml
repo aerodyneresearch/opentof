@@ -44,6 +44,7 @@ dependencies = [
     "tqdm>=4.66",
     "customtkinter>=5.2",   # GUI component (pulls in Tk)
     "pyarrow>=14.0",        # runtime engine for pandas .parquet I/O (not imported directly)
+    "psutil>=5.9.0",
 ]
 
 [project.urls]
