@@ -35,21 +35,22 @@ from opentof.peak_fitting import (
 )
 from opentof.utils import truncate, ensure_dir, get_default_plot_dir
 
-def ransac_peak_width(reference_spectrum, rs_mass_axis, 
-               min_prominence=0.9,
-               minimum_mass_spacing=1.0, 
-               residual_threshold_multiplier=0.10,
-               search_range=None,
-               peak_type='gaussian', 
-               custom_shape=None,
-               max_mz=None,
-               force_zero_intercept=False, # probably uneeded and maybe even unphysical?
-               output_dir=None,
-               plot_flag=True,
-               show_plot_flag=True,
-               plot_name='peak_width.png',
-               ransac_kwargs=None
-               ):
+def ransac_peak_width(reference_spectrum, 
+                      rs_mass_axis, 
+                      min_prominence=0.9,
+                      minimum_mass_spacing=1.0, 
+                      residual_threshold_multiplier=0.10,
+                      search_range=None,
+                      peak_type='gaussian', 
+                      custom_shape=None,
+                      max_mz=None,
+                      force_zero_intercept=False, # probably uneeded and maybe even unphysical?
+                      output_dir=None,
+                      plot_flag=True,
+                      show_plot_flag=True,
+                      plot_name='peak_width.png',
+                      ransac_kwargs=None
+                      ):
     """
     Defines a peak width function that uses RANSAC to robustly fit a linear FWHM model 
     to mass spectral peaks, automatically ignoring outliers (e.g., overlapping isotopes).
@@ -536,8 +537,8 @@ def peak_shape(reference_spectrum,
                peak_smoothing=0, # Apply smoothing to found raw peak shapes (no smoothing by default)
                mean_smoothing=1.0, # Apply minor smoothing to the mean shape (can help with center disconinutity)
                cursor_position=8,
-               omega_r=0.70, # right side omega "apex tightness" parameter (higher = more aggressive)
-               omega_l=0.80, # left side omega "apex tightness" parameter (higher = more aggressive)
+               omega_r=0.70, # [0-1] right side omega "apex tightness" parameter (higher = more aggressive)
+               omega_l=0.80, # [0-1] left side omega "apex tightness" parameter (higher = more aggressive)
                # Try to get rid of "flat" peaks
                flatness_region=0.5, # σ range from center to check
                flatness_thresh=0.95, # Higher = more tolerant to flatness
@@ -814,7 +815,7 @@ def peak_shape(reference_spectrum,
         zoom_settings = [
             ("Full Range", 10, 0.0, 1.2),
             ("Peak Zoom", 1.3, 0.7, 1.2),
-            ("Tail Zoom", 10, 0.0, 0.1),
+            ("Tail Zoom", 10, -0.05, 0.1),
         ]
 
         # --- PANEL 0: Unfiltered peaks (full view) ---
@@ -870,9 +871,9 @@ def peak_shape(reference_spectrum,
                         linestyle='dashdot', color='darkgreen')
 
                 ax.plot(x_right_axis, lower_bound_right,
-                        linestyle='dashdot', color='maroon', label=rf"\% Filter Lower Bound")
+                        linestyle='dashdot', color='maroon', label=rf"IQR Filter Lower Bound")
                 ax.plot(x_right_axis, upper_bound_right,
-                        linestyle='dashdot', color='darkgreen', label=rf"\% Filter Upper Bound")
+                        linestyle='dashdot', color='darkgreen', label=rf"IQR Filter Upper Bound")
 
             # === Flatness filter visualization ===
             if plot_flatness_filter and flatness_region > 0:

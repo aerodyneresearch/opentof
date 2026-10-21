@@ -1972,7 +1972,7 @@ def define_reference_spectrum(calibration_results,
     # Verify standard acquisition data coverage; fallback to all spectra if coverage < 50%
     is_50_percent_true = np.mean(standard_acq_data) >= 0.5
     if not is_50_percent_true:
-        print("WARNING! Less than 60% of data is standard acquisition data. Using all available writebufs to generate averaged dataset...")
+        print("WARNING! Less than 50% of data is standard acquisition data. Using all available writebufs to generate averaged dataset...")
         standard_acq_data = np.full_like(standard_acq_data, True, dtype=bool)
 
     # Isolate global valid writebuf indices and filter timestamps/interval mapping

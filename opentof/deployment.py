@@ -71,11 +71,11 @@ class Deployment:
     instrument_type : str or None
         Detected instrument configuration string (e.g., ``"SingleSegment"`` or ``"MultiSegment"``).
     calibration : dict or None
-        Mass calibration results dictionary returned by :meth:`mass_calibration`.
+        Mass calibration results dictionary returned by `mass_calibration`
     reference : dict or None
-        Reference spectrum results dictionary returned by :meth:`determine_reference_spectrum`.
+        Reference spectrum results dictionary returned by `determine_reference_spectrum`.
     baseline : dict or None
-        Baseline evaluation results dictionary returned by :meth:`determine_baseline`.
+        Baseline evaluation results dictionary returned by `determine_baseline`.
     peak_shape_interp : scipy.interpolate.interp1d or None
         1D cubic spline interpolator representing the empirical peak shape.
     custom_peak_shape : callable or None
@@ -287,6 +287,7 @@ class Deployment:
 
         print("Step 1/6: Loading .h5 files")
         # Loop through discovered files and parse metadata
+        file_nbr_samples = {}
         for idx, file in enumerate(files):
             try:
                 h5, timestamps, shape, sort_idx = cls._load_and_parse_h5(file, idx)
@@ -313,32 +314,36 @@ class Deployment:
                 
                 # Record sample channel counts across files
                 if 'NbrSamples' in h5.attrs:
-                    ns = int(cls._get_scalar_attr(h5, 'NbrSamples'))
-                    nbr_samples_list.append(ns)
+                    file_nbr_samples[file] = int(cls._get_scalar_attr(h5, 'NbrSamples'))
 
-                target_nbr_samples = None
-                if nbr_samples_list:
-                    min_samples = min(nbr_samples_list)
-                    max_samples = max(nbr_samples_list)
-
-                    # Warn if sample counts vary across files and require truncation
-                    if ns != max_samples:
-                        if not warning_already_printed:
-                            print(f"[WARNING] The 'NbrSamples' is inconsistent between files within the requested directory.")
-                            warning_already_printed = True
-                        print(f"{file} has {ns} 'NbrSamples' which is longer than: {min_samples} 'NbrSamples'. Excess will be truncated down to this length.")
-
-                    # Enforce safety check to prevent merging fundamentally mismatched datasets
-                    if max_samples > 2 * min_samples:
-                        raise ValueError(
-                            f"Fatal mismatch in NbrSamples across files. "
-                            f"Max NbrSamples ({max_samples}) is more than twice the min NbrSamples ({min_samples}) accross all files. "
-                            f"Check that the input files are from the same instrument or configuration. "
-                        )
-                    target_nbr_samples = min_samples
             except (KeyError, Exception) as e:
                 print(f"⚠️ Warning: Skipping file {file}.")
                 continue
+
+        # Evaluate NbrSamples across all files after completing directory scan
+        target_nbr_samples = None
+        if file_nbr_samples:
+            nbr_samples_list = list(file_nbr_samples.values())
+            min_samples = min(nbr_samples_list)
+            max_samples = max(nbr_samples_list)
+
+            # Enforce safety check to prevent merging fundamentally mismatched datasets
+            if max_samples > 2 * min_samples:
+                raise ValueError(
+                    f"Fatal mismatch in NbrSamples across files. "
+                    f"Max NbrSamples ({max_samples}) is more than twice the min NbrSamples ({min_samples}) across all files. "
+                    f"Check that the input files are from the same instrument or configuration."
+                )
+
+            # Warn if sample counts vary across files and report which files actually exceed min_samples
+            if min_samples != max_samples:
+                print("[WARNING] The 'NbrSamples' is inconsistent between files within the requested directory.")
+                for file_path, ns in file_nbr_samples.items():
+                    if ns > min_samples:
+                        print(f"{file_path} has {ns} 'NbrSamples' which is longer than: {min_samples} 'NbrSamples'. Excess will be truncated down to this length.")
+
+            target_nbr_samples = min_samples
+
 
         # Instantiate Deployment container with parsed file handles and parameters
         obj = cls(file_handles, file_timestamps, file_shapes, sort_indices, target_nbr_samples, chunk_size, segment_profiles, reagent_ion, plot_dir=plot_dir)
@@ -1488,8 +1493,8 @@ class Deployment:
         # Configure keyword argument overrides for downstream plotting routines
         kwargs['output_dir'] = output_dir
         kwargs['show_plot_flag'] = show_plot_flag
-        kwargs['mc_summary_plot_name'] = "mc_summary.png"
-        kwargs['tof_drift_plot_name'] = "tof_drift.png"
+        kwargs.setdefault('mc_summary_plot_name', "mc_summary.png")
+        kwargs.setdefault('tof_drift_plot_name', "tof_drift.png")
 
         # --- STEP 1: DETECT AND RECONSTRUCT IMPORTED MASS CALIBRATION PARAMETERS ---
         # If calibration data was imported from Tofware/IF files, bypass fitting optimization
@@ -2289,6 +2294,73 @@ class Deployment:
         self.peak_data = result_df
 
         # Return self instance to enable method chaining
+        return self
+
+    def integrate_UMR(self, nm_list=None, nm_search_range=0.5, 
+                  merge_to_peak_data=True, verbose=True) -> Deployment:
+        """
+        Numerically integrate baseline-subtracted signal within nominal mass bounds across time.
+
+        Parameters
+        ----------
+        nm_list : sequence of int, tuple of (int, int), or None, default=None
+            Target nominal masses to integrate.
+            - If None (default): Automatically detects all available nominal masses 
+            spanned by `self.first_guess_mass_axis`.
+            - If tuple (min_nm, max_nm): Integrates all integer nominal masses in that range.
+            - If list/array: Integrates the specific listed nominal masses.
+        nm_search_range : float, default=0.5
+            Half-width window around each nominal mass integer ([NM - Δ, NM + Δ]).
+        merge_to_peak_data : bool, default=True
+            If True, merges resulting UMR columns into `self.peak_data` on `MS_index`.
+        verbose : bool, default=True
+            If True, displays Dask progress bars.
+
+        Returns
+        -------
+        self : Deployment
+            Updated Deployment instance with UMR signal columns added to `self.peak_data`.
+        """
+        if getattr(self, 'calibration', None) is None:
+            raise ValueError("Mass calibration not run. Call `mass_calibration()` first.")
+        if getattr(self, 'tofdata_subtracted', None) is None:
+            raise ValueError("Baseline profile not determined. Call `determine_baseline()` first.")
+
+        # --- Flexible Nominal Mass Selection ---
+        if nm_list is None:
+            if getattr(self, 'first_guess_mass_axis', None) is None:
+                raise ValueError("`first_guess_mass_axis` is None. Cannot auto-detect nominal masses.")
+            
+            # Auto-discover all available integer nominal masses across the detector axis
+            nm_list = np.unique(np.round(self.first_guess_mass_axis)).astype(int)
+            
+        elif isinstance(nm_list, tuple) and len(nm_list) == 2:
+            # User passed a range tuple like (10, 500)
+            nm_list = list(range(int(nm_list[0]), int(nm_list[1]) + 1))
+        else:
+            # User passed an explicit list or array
+            nm_list = [int(x) for x in nm_list]
+
+        from opentof.peak_fitting import full_umr_integration
+
+        umr_df = full_umr_integration(
+            tofdata_subtracted=self.tofdata_subtracted,
+            calibration_results=self.calibration,
+            sample_index_axis=self.sample_index_axis,
+            tof_axis=self.tof_axis,
+            nm_list=nm_list,
+            nm_search_range=nm_search_range,
+            chunk_size=self.chunk_size,
+            verbose=verbose
+        )
+
+        if merge_to_peak_data:
+            if self.peak_data is None:
+                self.peak_data = umr_df
+            else:
+                # Merge left on MS_index to keep all existing high-res peak_data rows intact
+                self.peak_data = pd.merge(self.peak_data, umr_df, on="MS_index", how="left")
+
         return self
     
     def generate_averaged_dataset(self, averaging_interval=300, 
@@ -3114,9 +3186,379 @@ class Deployment:
         self.diagnostic_fits[f"unconstrained_{nominal_mass}"] = result
         return result
 
+    def synthesize_cycling_status(self, 
+                                  overwrite=False,
+                                  min_ambient_points=30,
+                                  zero_mfc_thresh=50.0, 
+                                  cal_mfc_thresh=1.0, 
+                                  plot_flag=True, 
+                                  output_dir=None, 
+                                  plot_filename="deployment_cycling.png"):
+        """
+        Reconstruct d.cycling_status['type'] and d.standard_acquisition_data using
+        MFC flow monitors and valve target telemetry from TPS2.
+
+        Includes run-length filtering to eliminate transient 'ambient' blips (1-point
+        dropouts or valve-switching chatter) by absorbing them into the surrounding
+        non-standard cycling phases.
+
+        Parameters
+        ----------
+        overwrite : bool, default=False
+            If False and the deployment already has valid cycling flags (type 1 or 4),
+            synthesis is skipped to protect ground truth data.
+        min_ambient_points : int, default=30
+            Minimum number of consecutive spectra required to qualify as legitimate
+            ambient acquisition data. Any run of status == 0 shorter than this threshold
+            is disallowed and absorbed into the adjacent cycling events.
+        zero_mfc_thresh : float, default=50.0
+            Minimum flow (sccm) on the Zero MFC to classify as active zero air overflow.
+        cal_mfc_thresh : float, default=1.0
+            Minimum flow (sccm) on the Cal MFC to classify as active calibration challenge.
+        plot_flag : bool, default=True
+            If True, saves a 2-panel verification plot of the cycle status and flows.
+        output_dir : str or None, default=None
+            Target directory for the plot. Defaults to OpenTof default plot dir.
+        plot_filename : str, default="deployment_cycling.png"
+            Filename for the exported diagnostic plot.
+
+        Returns
+        -------
+        self : Deployment
+            The Deployment instance.
+        """
+        # --- 1. Ground Truth Protection Guardrail ---
+        current_type = getattr(self, 'cycling_status', {}).get('type', None)
+        has_existing_cycling = (
+            current_type is not None and 
+            np.any(np.isin(current_type, [1, 4]))
+        )
+
+        if has_existing_cycling and not overwrite:
+            n_zeros = np.sum(current_type == 1)
+            n_cals = np.sum(current_type == 4)
+            print(
+                f"ℹ️ Valid cycling table already present ({n_zeros} zero points, {n_cals} cal points). "
+                f"Skipping synthesis. Pass `overwrite=True` if you wish to re-derive from flows/valves."
+            )
+            return self
+
+        # --- 2. Telemetry Availability Guard ---
+        if not hasattr(self, 'tps2') or not self.tps2:
+            warnings.warn("No TPS2 telemetry found in deployment. Cannot synthesize cycling status.")
+            return self
+
+        n_spectra = len(self.timestamps)
+        status = np.zeros(n_spectra, dtype=np.int32)
+
+        # --- 3. Extract Mass Flow Controller Monitors from TPS2 ---
+        zero_flow = None
+        cal_flow = None
+        for k in self.tps2.keys():
+            k_low = k.lower()
+            if 'mfc' in k_low:
+                if 'zero' in k_low and zero_flow is None:
+                    zero_flow = np.asarray(self.tps2[k], dtype=float)
+                elif 'cal' in k_low and cal_flow is None:
+                    cal_flow = np.asarray(self.tps2[k], dtype=float)
+
+        # --- 4. Extract Valve Target State Commands ---
+        cal_valve = None
+        zero_valve = None
+        for k in self.tps2.keys():
+            k_low = k.lower()
+            if 'valve' in k_low:
+                if 'pr1' in k_low or 'cal' in k_low:
+                    cal_valve = (np.asarray(self.tps2[k]) == 1)
+                elif 'pr2' in k_low or 'zero' in k_low:
+                    zero_valve = (np.asarray(self.tps2[k]) == 1)
+
+        # --- 5. Establish Physical Active Flow Conditions ---
+        zero_flowing = (zero_flow > zero_mfc_thresh) if (zero_flow is not None and len(zero_flow) == n_spectra) else True
+        cal_flowing = (cal_flow > cal_mfc_thresh) if (cal_flow is not None and len(cal_flow) == n_spectra) else True
+
+        # Phase 4 (Sensitivity Cal Challenge): Cal gas flowing & cal valve open
+        if cal_valve is not None:
+            is_cal = cal_valve & cal_flowing
+        elif cal_flow is not None:
+            is_cal = cal_flow > cal_mfc_thresh
+        else:
+            is_cal = np.zeros(n_spectra, dtype=bool)
+
+        # Phase 1 (Auto-Zero Air): Zero air flowing & zero valve open, with Cal gas OFF
+        if zero_valve is not None:
+            is_zero = (zero_valve & zero_flowing) & ~is_cal
+        elif zero_flow is not None:
+            is_zero = (zero_flow > zero_mfc_thresh) & ~is_cal
+        else:
+            is_zero = np.zeros(n_spectra, dtype=bool)
+
+        status[is_zero] = 1
+        status[is_cal] = 4
+
+        # --- 6. RUN-LENGTH FILTER: ABSORB SHORT TRANSIENT AMBIENT RUNS ---
+        # Any stretch of status == 0 shorter than min_ambient_points is an artifact
+        if min_ambient_points > 1:
+            i = 0
+            absorbed_blips = 0
+            while i < n_spectra:
+                if status[i] == 0:
+                    start = i
+                    while i < n_spectra and status[i] == 0:
+                        i += 1
+                    end = i
+                    run_len = end - start
+
+                    # If the ambient period is too short, bridge it into the surrounding cycle
+                    if run_len < min_ambient_points:
+                        absorbed_blips += 1
+                        prev_val = status[start - 1] if start > 0 else None
+                        next_val = status[end] if end < n_spectra else None
+
+                        if prev_val is not None and next_val is not None:
+                            if prev_val == next_val:
+                                # Bridge across single-point dips during zero air or cal
+                                status[start:end] = prev_val
+                            else:
+                                # Transition between Zero and Cal: split at midpoint
+                                mid = start + (run_len // 2)
+                                status[start:mid] = prev_val
+                                status[mid:end] = next_val
+                        elif prev_val is not None:
+                            # Transient blip at the very end of deployment
+                            status[start:end] = prev_val
+                        elif next_val is not None:
+                            # Startup chatter at the beginning of deployment
+                            status[start:end] = next_val
+                else:
+                    i += 1
+
+            # # Debug
+            # if absorbed_blips > 0:
+                # print(f"Cleaned up {absorbed_blips} transient ambient blip(s) (< {min_ambient_points} points).")
+
+        # --- 7. Backup & State Assignment ---
+        if getattr(self, '_cycling_status', None) is None:
+            self._cycling_status = {}
+        elif 'type' in self._cycling_status and getattr(self, '_original_cycling_status', None) is None:
+            self._original_cycling_status = self._cycling_status['type'].copy()
+
+        self._cycling_status['type'] = status
+        
+        # Ambient acquisition should now have no runs shorter than min_ambient_points
+        self.standard_acquisition_data = (status == 0)
+
+        n_zero_pts = np.sum(status == 1)
+        n_cal_pts = np.sum(status == 4)
+        n_amb_pts = np.sum(status == 0)
+        print(f"Cycling status synthesis found: {n_zero_pts} zero points, {n_cal_pts} cal points, {n_amb_pts} ambient points.")
+
+        # --- 8. Diagnostic Verification Plot ---
+        if plot_flag:
+            from opentof.utils import get_default_plot_dir, ensure_dir
+            if output_dir is None:
+                base_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
+                output_dir = os.path.join(base_dir, self.default_plot_subdir)
+            ensure_dir(output_dir)
+
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, 
+                figsize=(12, 6), 
+                sharex=True, 
+                dpi=150, 
+                gridspec_kw={'height_ratios': [1, 2]}
+            )
+
+            # Subplot 1: Cleaned Phase Timeline
+            ax1.plot(self.timestamps, status, color='indigo', lw=1.2)
+            ax1.set_ylabel("Cycle Phase", fontweight='bold')
+            ax1.set_yticks([0, 1, 4])
+            ax1.set_yticklabels(["0 (Ambient)", "1 (Zero)", "4 (Cal)"])
+            ax1.grid(True, alpha=0.3, linestyle="--")
+            ax1.set_title(f"Synthesized Cycling Status")
+
+            # Subplot 2: Physical Flows Supporting the Assignment
+            if zero_flow is not None:
+                ax2.plot(self.timestamps, zero_flow, color='blue', alpha=0.7, label='Zero MFC [sccm]')
+            if cal_flow is not None:
+                ax2_twin = ax2.twinx()
+                ax2_twin.plot(self.timestamps, cal_flow, color='crimson', alpha=0.8, label='Cal MFC [sccm]')
+                ax2_twin.set_ylabel("Cal MFC (sccm)", color='crimson', fontweight='bold')
+                ax2_twin.tick_params(axis='y', labelcolor='crimson')
+
+            ax2.set_ylabel("Zero MFC (sccm)", color='blue', fontweight='bold')
+            ax2.tick_params(axis='y', labelcolor='blue')
+            ax2.set_xlabel("Time (UTC)")
+            ax2.grid(True, alpha=0.3, linestyle="--")
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, plot_filename), bbox_inches='tight')
+            plt.close()
+
+        return self
+
+    def quantify_signal(self, peak_target,
+                        cal_tank_conc=1000.0,
+                        zero_flow=None,
+                        cal_flow=None,
+                        static_sens_factor=1.0,
+                        mode="interp",
+                        cycling_zeros=True,
+                        cycling_sens_cals=True,
+                        normalization=False,
+                        normalization_reference=None,
+                        static_target_value=1e6,
+                        min_zero_points=5,
+                        min_cal_points=5,
+                        min_signal_delta=0.5,
+                        plot_flag=False,
+                        output_dir=None,
+                        plot_subdir="quantification_plots",
+                        **kwargs):
+        """
+        High-level wrapper to quantify a target peak into concentration units (ppb).
+        
+        This wrapper automates the retrieval of inputs required for the quantification backend.
+        It automatically extracts flow arrays from the Mass Flow Controllers (MFCs) in `self.tps2`, 
+        locates the integrated area of the target peak from `self.peak_data`, and feeds the 
+        instrument's cycling telemetry (`self.cycling_status`) into the processor.
+
+        Parameters
+        ----------
+        peak_target : str or numpy.ndarray
+            Compound formula string (e.g., 'C6H6+') found in `self.peak_data`, or a 1D signal array.
+        cal_tank_conc : float, default=1000.0
+            Concentration of calibration gas cylinder in ppbV.
+        zero_flow : float, array-like, or None, default=None
+            Dilution zero air flow (sccm). If None, auto-extracted from `self.tps2['Zero MFC monitor [sccm]']`.
+            Automatically pulls the correct median flow value recorded *during* the physical event.
+        cal_flow : float, array-like, or None, default=None
+            Calibration gas standard flow (sccm). If None, auto-extracted from `self.tps2['Cal MFC monitor [sccm]']`.
+        static_sens_factor : float, default=1.0
+            Fallback conversion factor used when cycling calibrations are absent or disabled.
+        mode : {'interp', 'median'}, default='interp'
+            Interpolation mode across time for zero subtraction and sensitivity calibration.
+            'interp' draws a line between event centers; 'median' applies a single global median.
+        cycling_zeros : bool, default=True
+            If True, locates auto-zero periods (type flag 1.0) to subtract dynamic backgrounds.
+        cycling_sens_cals : bool, default=True
+            If True, locates sensitivity cal periods (type flag 4.0) to calculate dynamic sensitivities.
+        normalization : bool, default=False
+            If True, normalizes peak areas against a primary reagent ion signal to combat source fluctuation.
+        normalization_reference : str or array-like, default=None
+            Formula string of reagent ion (e.g., 'I-') or an explicit 1D array of reference counts.
+        min_zero_points : int, default=5
+            Minimum number of sample points required to accept a zero block (rejects aborted cycles).
+        min_signal_delta : float, default=0.5
+            Minimum required signal response step (ions/s) to accept a calibration challenge block.
+            If the compound is not in the cal tank, this prevents dividing by noise.
+        plot_flag : bool, default=False
+            If True, exports diagnostic subplots for every zero and calibration block analyzed.
+
+        Returns
+        -------
+        ppb_bc : numpy.ndarray
+            1D array of final background-corrected and calibrated concentrations in ppb.
+        sens_axis : numpy.ndarray
+            1D array of dynamic or static sensitivity calibration factors applied.
+        bg_corr : numpy.ndarray
+            1D array of signal values after zero subtraction but before sensitivity scaling.
+        working_arr : numpy.ndarray
+            1D array of signal values prior to background subtraction (with normalization applied if requested).
+        """
+        from opentof.quantification import quantify_signal as backend_quantify
+        from opentof.utils import get_default_plot_dir
+
+        # --- 1. Resolve Target Signal ---
+        # Locate the peak area array from the fitted peak_data DataFrame
+        if isinstance(peak_target, str):
+            if self.peak_data is None:
+                raise ValueError("Deployment.peak_data is not populated. Run peak fitting first.")
+            col_area = f"{peak_target}_area"
+            col_amp = f"{peak_target}_amplitude"
+            if col_area in self.peak_data.columns:
+                signal_array = self.peak_data[col_area].to_numpy()
+            elif col_amp in self.peak_data.columns:
+                signal_array = self.peak_data[col_amp].to_numpy()
+            elif peak_target in self.peak_data.columns:
+                signal_array = self.peak_data[peak_target].to_numpy()
+            else:
+                raise KeyError(f"Peak '{peak_target}' not found in Deployment.peak_data columns.")
+        else:
+            # If the user passed in a custom numpy array directly
+            signal_array = np.asarray(peak_target, dtype=float)
+
+        # --- 2. Auto-Detect Flows from TPS2 Telemetry ---
+        # Find Mass Flow Controller (MFC) variables in the telemetry cache via substring matching
+        if zero_flow is None:
+            if hasattr(self, 'tps2') and self.tps2:
+                matched_zero = [k for k in self.tps2.keys() if 'zero' in k.lower() and 'mfc' in k.lower()]
+                if matched_zero:
+                    zero_flow = self.tps2[matched_zero[0]]
+            if zero_flow is None:
+                zero_flow = 250.0  # Fallback default
+
+        if cal_flow is None:
+            if hasattr(self, 'tps2') and self.tps2:
+                matched_cal = [k for k in self.tps2.keys() if 'cal' in k.lower() and 'mfc' in k.lower()]
+                if matched_cal:
+                    cal_flow = self.tps2[matched_cal[0]]
+            if cal_flow is None:
+                cal_flow = 5.0  # Fallback default
+
+        # --- 3. Resolve Normalization Reference ---
+        # Allow passing the formula string of the primary reagent ion (e.g., "I-")
+        norm_ref_vals = None
+        if normalization:
+            if isinstance(normalization_reference, str):
+                if self.peak_data is not None:
+                    col_ref = f"{normalization_reference}_area"
+                    col_ref_alt = f"{normalization_reference}_amplitude"
+                    if col_ref in self.peak_data.columns:
+                        norm_ref_vals = self.peak_data[col_ref].to_numpy()
+                    elif col_ref_alt in self.peak_data.columns:
+                        norm_ref_vals = self.peak_data[col_ref_alt].to_numpy()
+            elif normalization_reference is not None:
+                norm_ref_vals = np.asarray(normalization_reference)
+
+        # --- 4. Resolve Output Directories ---
+        if output_dir is None:
+            output_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
+        if plot_subdir is None:
+            plot_subdir = self.default_plot_subdir
+
+        # --- 5. Call Backend Code ---
+        ppb_bc, sens_axis, bg_corr, working_arr = backend_quantify(
+            peak_area_array=signal_array,
+            cycling_dict=getattr(self, 'cycling_status', None),
+            cycling_zeros=cycling_zeros,
+            cycling_sens_cals=cycling_sens_cals,
+            normalization=normalization,
+            normalization_reference_values=norm_ref_vals,
+            static_target_value=static_target_value,
+            cal_tank_conc=cal_tank_conc,
+            zero_flow=zero_flow,
+            cal_flow=cal_flow,
+            static_sens_factor=static_sens_factor,
+            mode=mode,
+            min_zero_points=min_zero_points,
+            min_cal_points=min_cal_points,
+            min_signal_delta=min_signal_delta,
+            plot_flag=plot_flag,
+            output_dir=output_dir,
+            plot_subdir=plot_subdir,
+            # Context arguments forwarded to plot_quantification_summary
+            timestamps=self.timestamps,
+            standard_acq_mask=self.standard_acquisition_data,
+            compound_name=peak_target if isinstance(peak_target, str) else "Target Peak",
+            **kwargs
+        )
+
+        return ppb_bc, sens_axis, bg_corr, working_arr
+
     # TODO: Maybe make a function that populates all nominal masses with this/a similar method? 
     # -> This would take a while currently so maybe its best to dissuade users from this
-    # but keep the method in case they want to make something custom
+    # but keep the method in case they want to make something custom?
     def populate_nm_data_for(self, nominal_mass, force_non_subtracted=False, **kwargs) -> Deployment:
         """
         Extract intensity segment data for a specific nominal mass across all spectra.
@@ -3892,7 +4334,7 @@ class Deployment:
         return nm_node_data, som_err_metrics, som
 
 
-    def export_to_h5(self, output_dir=None, driver="PIF") -> Deployment:
+    def export_to_h5(self, output_dir=None, filename=None, driver="PIF") -> Deployment:
         """
         Export workspace state, mass calibrations, baselines, and peak shapes to HDF5 files.
 
@@ -3930,7 +4372,7 @@ class Deployment:
 
         # Route export request to corresponding private serializer backend
         if driver == "OT":
-            return self._export_ot(output_dir)
+            return self._export_ot(output_dir=output_dir, filename=filename)
         elif driver == "P":
             return self._export_p(output_dir)
         elif driver == "IF":
@@ -4000,7 +4442,7 @@ class Deployment:
     # =========================================================================
     # EXPORT HELPERS
     # =========================================================================
-    def _export_ot(self, output_dir):
+    def _export_ot(self, output_dir=None, filename=None):
         """
         Private helper to serialize complete Deployment workspace state into a native OpenTof HDF5 file.
 
@@ -4028,13 +4470,24 @@ class Deployment:
         if output_dir is None:
             raise ValueError("An explicit destination path or folder must be provided for 'OT' mode.")
         
-        # Resolve target output file path (defaulting to 'opentof_deployment.h5' if directory path is passed)
-        path_obj = Path(output_dir)
-        if path_obj.is_dir() or path_obj.suffix != ".h5":
-            out_filepath = path_obj / "opentof_deployment.h5"
+        if output_dir is None:
+            out_filepath = Path(filename)
         else:
-            out_filepath = path_obj
-            
+            path_obj = Path(output_dir)
+            if filename:
+                # Combine directory and filename
+                parent_dir = path_obj.parent if path_obj.suffix == ".h5" else path_obj
+                out_filepath = parent_dir / filename
+            elif path_obj.suffix == ".h5":
+                # Direct filepath was passed as output_dir
+                out_filepath = path_obj
+            else:
+                # Fallback to default directory structure
+                out_filepath = path_obj / "opentof_deployment.h5"
+
+        if not out_filepath.name.endswith(".h5"):
+            out_filepath = out_filepath.with_suffix(".h5")
+
         out_filepath.parent.mkdir(parents=True, exist_ok=True)
         print(f"Saving OpenTof deployment state to: {out_filepath}")
 
@@ -4071,7 +4524,11 @@ class Deployment:
             if self.plot_dir is not None:
                 f.attrs["plot_dir"] = str(self.plot_dir)
             if self.segment_profiles is not None:
-                f.attrs["segment_profiles"] = json.dumps(self.segment_profiles)
+                clean_profiles = {
+                    k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                    for k, v in self.segment_profiles.items()
+                }
+                f.attrs["segment_profiles"] = json.dumps(clean_profiles)
 
             # Serialize raw peak width floor coefficients and corruption tracking flags
             if getattr(self, 'raw_peak_width_coeffs', None) is not None:

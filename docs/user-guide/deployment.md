@@ -514,7 +514,7 @@ More information regarding the process of defining the peak width function and a
 
 ### Deployment.determine_peak_shape
 
-Although we would love for peaks in the mass spectrum to follow a perfect gaussian shape, this is rarely the case, and as such, defining a custom instrument-specific peak shape can be benifitial for both refining the mass calibration and for more accurate integration of final peak areas.
+Although we would love for peaks in the mass spectrum to follow a perfect gaussian shape, this is rarely the case, and as such, defining a custom instrument-specific peak shape can be beneficial for both refining the mass calibration and for more accurate integration of final peak areas.
 
 To define an instrument specific peak shape using all default parameters it is only necessary to call:
 
@@ -677,11 +677,11 @@ colors = cmap(np.linspace(0.0, 0.9, len(peak_list)))
 
 # Plot each peak on its own subplot
 for ax, peak, color in zip(axes, peak_list, colors):
-    ppb_conc = d.peak_data[f'{peak}_area']
+    peak_area_ts = d.peak_data[f'{peak}_area']
     
     ax.plot(
         d.timestamps[d.standard_acquisition_data], 
-        ppb_conc[d.standard_acquisition_data], 
+        peak_area_ts[d.standard_acquisition_data], 
         label=peak, 
         alpha=0.9,
         color=color
@@ -692,7 +692,7 @@ for ax, peak, color in zip(axes, peak_list, colors):
     ax.legend(loc="upper right")
 
 # Set the overall title and bottom x-axis label
-fig.suptitle("Timeseries by Species", fontsize=14, y=0.99)
+fig.suptitle("Peak List Timeseries", fontsize=14, y=0.99)
 axes[-1].set_xlabel("UTC time")
 
 plt.tight_layout()
@@ -733,13 +733,63 @@ We can use the same plotting code from the `FFI_constrained` block to plot the r
 
 ## Other `Deployment` helper functions
 
-This subsection will discuss methods that are present within the Deployment class, but not necessarily within the "core" HRTS workflow. These methods are largely here for convienence and it is not expected that the typical user will use any or all of them in a particular workflow. However, these functions often handle tasks that the OpenTof developers had run into frequently and were therefore deemed worthy of including within the code.
+This subsection will discuss methods that are present within the Deployment class, but not necessarily within the "core" HRTS workflow. These methods are largely here for convienence and it is not expected that the typical user will use any or all of them in a particular workflow. However, these functions often handle tasks that OpenTof users will run into frequently and were therefore deemed worthy of including within the code.
+
+### Deployment.integrate_UMR
+
+This functions purpose is to quickly numerically integrate the signal at all nominal mass bounds and store the results in `Deployment.peak_data`. Although it is no substitute for high res peak fitting, it is a relatively cheap computation and can be a useful tool for determining other potentially active nominal masses (that may require further investigation).
+
+It can be called with:
+
+```python
+d.integrate_UMR()
+```
+
+Which we can adapt our previous timeseries code to produce the following plot.
+
+```python
+# plotting code tesing UMR fitting
+nm_to_try = np.unique(np.round(d.first_guess_mass_axis)).astype(int)[::50] #[31, 45, 79, 109, 121, 150, 203, 260, 371,]
+
+# Create vertically stacked subplots (one row per peak)
+fig, axes = plt.subplots(
+    nrows=len(nm_to_try), 
+    ncols=1, 
+    figsize=(12, 2 * len(nm_to_try)), 
+    sharex=True
+)
+
+# Plot each peak on its own subplot
+for ax, nm in zip(axes, nm_to_try):
+    ppb_conc = d.peak_data[f'UMR_NM_{nm}_area']
+    
+    ax.plot(
+        d.timestamps[d.standard_acquisition_data], 
+        ppb_conc[d.standard_acquisition_data], 
+        label=nm, 
+        alpha=0.8
+    )
+    
+    ax.set_ylabel(f"{nm}\n(ions/s)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right")
+
+# Set the overall title and bottom x-axis label
+fig.suptitle("Select UMR Timeseries", fontsize=14, y=0.99)
+axes[-1].set_xlabel("UTC time")
+
+plt.tight_layout()
+plt.show()
+plt.close()
+```
+
+![Integrated_UMR_Timeseries](../assets/images/deployment_md/deployment_integrate_UMR.png)
 
 ### Deployment.generate_averaged_dataset
 
 This method acts as a wrapper function around the the `generate_averaged_dataset` function within [mass_calibration.py](../user-guide/mass-calibration.md). This method will process the `averaging_interval` (default=`300`seconds or 5 minutes) parameter and will calculate the averaged dataset based on this interval and the `Deployment.timestamps` attribute.
 
-The wrapper function can be called using:
+This wrapper function can be called using:
 
 ```python
 d.generate_averaged_dataset(averaging_interval=300)
@@ -922,6 +972,94 @@ print(d.diagnostic_fits['unconstrained_121'].keys()) # information for some entr
 dict_keys(['unconstrained_121'])
 dict_keys(['nominal_mass', 'mz_segment', 'int_segment', 'total_fit', 'peaks', 'fit_params'])
 """
+```
+
+### Deployment.synthesize_cycling_status
+
+We can't actually use our demo data to demonstrate this function as this function isn't needed for these datafiles. However, for out next wrapper function (`Deployment.quantify_signal`) it is important to have any instrument cycling defined over the acquisition period. Therefore it is the job of `synthesize_cycling_status` to imply any underlying cycling table from the instrument telemetry (opening/closing of cal/zero valves) and associate that with a flow value at that particular time. 
+
+It can be called similarly to our other high-level functions:
+
+```python
+d.synthesize_cycling_status()
+```
+![sythesize_cycling_status](../assets/images/deployment_md/deployment_synthesize_cycling_status_final.png)
+
+OpenTof normally looks for zero/cal values states at the following TPS2 variables:
+
+```python
+for key, val in d.tps2.items():
+    print(f"{key}: {val}")
+# Output
+"""
+...
+Zero MFC monitor [sccm]: [249.954  249.9596 249.9596 ... 249.7226 249.7226 249.7226]
+Zero MFC target [sccm]: [250. 250. 250. ... 250. 250. 250.]
+Cal MFC monitor [sccm]: [5.007092 5.007092 5.006758 ... 4.991564 4.991564 5.002224]
+Cal MFC target [sccm]: [4.9998 4.9998 4.9998 ... 4.9998 4.9998 4.9998]
+...
+GSU_VALVE_PR1 target []: [1. 1. 1. ... 0. 0. 0.]
+GSU_VALVE_PR1 monitor []: [0. 0. 1. ... 0. 0. 0.]
+GSU_VALVE_PR2 target []: [0. 0. 0. ... 0. 0. 0.]
+GSU_VALVE_PR2 monitor []: [0. 0. 0. ... 0. 0. 0.]
+...
+"""
+```
+
+Before and after this function for a specific stretch of acquisition may look something like this:
+
+```python
+# plotting code:
+plt.figure(figsize=(12,6))
+plt.plot(d.timestamps, d.cycling_status['type']) # blue
+plt.plot(d.timestamps, d.standard_acquisition_data, alpha=0.5) # orange
+plt.title("Cycling Information")
+plt.xlabel("Time")
+plt.ylabel("Cycle Phase (catagorical)")
+plt.grid(True, alpha=0.3, linestyle="--")
+plt.show()
+```
+
+Before:
+![incomplete_cycling_table](../assets/images/deployment_md/deployment_synthesize_cycling_status_before.png)
+
+After:
+![properly-defined_cycling_table](../assets/images/deployment_md/deployment_synthesize_cycling_status_after.png)
+
+### Deployment.quantify_signal
+
+This is a wrapper function that performs a simple quantification pipline for translating ions/s areas into parts-per-billion concentrations. Sensitivities and calibration tank concentrations are required! This function has proven to be slightly unstable for longer reanalysis and should therefore be used with caution. This function is currently still relatively specialized for use with specific instrument configurations, so it is my hope that it can be made more general in the future. Please consider contributing if you come up with a good solution!
+
+In addition to performing background subtraction and applying sensitivies across the time-series (in accordance with the defined cycling table), this function also attempts to evaluate the stability of the segments of signal used for these operations as well.
+
+This figure is a good example visualization of this function processing realtime cycling data for methyl ethyl ketone ("MEK"):
+
+![MEK_quantification](../assets/images/deployment_md/deployment_quantify_signal.png)
+
+Notice that this first zero was rejected for being deemed an outlier compared to the other zero periods. This is done mainly to stabilized this function when `mode="interp"` as sometimes instrument operators start/stop acquisition at atypical times.
+
+Another use case for this function for CIMS users is performing reagent ion normalization, which can be acheieved with code similar to:
+
+```python
+# Compute the combined reagent ion normalization reference (I- + IH2O-)
+reagent_ion_ref = d.peak_data['I-_area'] + d.peak_data['IH2O-_area']
+
+hcni_ppb_bc, sensitivity_axis, bg_corrected, working_array = d.quantify_signal(
+    # Automatically retrieves 'HCNI-_area' from d.peak_data
+    peak_target='HCNI-',  
+    # Acquisition includes cycling zeros
+    cycling_zeros=True, 
+    # Acquisition does not include cycling sensitivity calibrations
+    cycling_sens_cals=False,  
+    # Instead of looking for realtime sensitivity calibrations within the cycling table, apply a single/static sensitivity factor 'm' calculated earlier that week. Usually the slope of a calibration curve.
+    static_sens_factor=m,  
+    normalization=True,
+    # Combined reagent ion reference array
+    normalization_reference=reagent_ion_ref,
+    # Scales to 10^6 primary counts as is typical in Iodide-CIMS literature
+    static_target_value=1e6,  
+    mode="interp",
+)
 ```
 
 ### Deployment.populate_nm_data_for
@@ -1139,9 +1277,35 @@ The difference between `fix_external_calibration` and `auto_fix_external_calibra
 
 The `auto_fix_external_calibration` also bases its "corrected" mass axis based on a provided `target_max` this should be populated with the typical highest mass to charge observed when the instrument is operating under normal conditions.
 
-### Deployment.nominal_mass_som (Experimental!)
+### Deployment.nominal_mass_som (Experimental)
 
-This function has yet to be updated to match changes to core methods
+This function trains a self-organizing map on the signal segments from a particular nominal mass!
+
+It can be called like so:
+
+```python
+# Train a SOM using nominal mass 121
+nm_node_data, som_err_metrics, som = d.nominal_mass_som(121)
+# Output
+"""
+Number of samples: 8194
+Vectorized feature length: 324
+'som_size' not provided, using some default size: (5,5)
+-----
+Initializing SOM with random weights...
+Begin [nm: 121] SOM Training...
+Training SOM with randomly ordered samples...
+End [nm: 121] SOM Training!
+[nm: 121] SOM training took: 0.401 seconds!
+-----
+"""
+```
+
+Which also saves a corresponding figure to ~/OpenTof/20260313_143039/121_SOM_weights.png by default:
+
+![121_Nominal_Mass_SOM](../assets/images/deployment_md/deployment_nominal_mass_som.png)
+
+For more information on this procedure see the source code: [som_helpers.py](../../opentof/som_helpers.py)
 
 ### Deployment.export_to_h5
 
@@ -1167,7 +1331,7 @@ By default when initializing a `Deployment` object with `from_directory` OpenTof
 # d.export_to_h5(output_dir=r"C:\Users\vageiser\Desktop\test", driver="OT")
 
 # Now
-dd = ot.Deployment() # Can be empty for driver="OT
+dd = ot.Deployment() # Can be initialized as empty when using driver="OT"
 dd.import_from_h5(r"C:\Users\vageiser\Desktop\test\opentof_deployment.h5", driver="OT")
 
 print(dd.tofdata)

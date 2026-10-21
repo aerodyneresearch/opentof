@@ -1588,8 +1588,8 @@ def fit_partially_constrained_nm(
     intensity_axis,
     tof_axis,
     known_peaks,
+    peak_width_function,
     n_unknowns=1,
-    peak_width_function=None,
     peak_type="gaussian",
     custom_shape=None,
     known_wiggle=0.05,
@@ -2274,7 +2274,7 @@ def full_fitting_integration_unconstrained(
         out_cols.extend([f"{p}_amplitude", f"{p}_center_mass", f"{p}_fwhm_mass", f"{p}_area"])
 
     if verbose:
-        print(f"Parallelizing unconstrained fit over {len(peak_list)} peaks across {tofdata_subtracted.shape[0]} spectra via Dask...")
+        print(f"Parallelizing fits for {len(peak_list)} peaks across {tofdata_subtracted.shape[0]} spectra...")
 
     # Execute worker function in parallel across Dask blocks
     with ProgressBar() if verbose else dask.config.set():
@@ -2624,7 +2624,7 @@ def full_fitting_integration_constrained(
         out_columns.extend([f"{p}_amplitude", f"{p}_area"])
     
     if verbose:
-        print(f"Parallelizing fit over {len(peak_list)} peaks across Dask array...")
+        print(f"Parallelizing fits for {len(peak_list)} peaks across {tofdata_subtracted.shape[0]} spectra...")
 
     # Execute worker function in parallel across Dask blocks
     with ProgressBar() if verbose else dask.config.set():
@@ -2649,3 +2649,81 @@ def full_fitting_integration_constrained(
     # Package output matrix into structured pandas DataFrame
     return pd.DataFrame(final_array.reshape(-1, len(out_columns)), columns=out_columns)
 
+def _umr_map_worker(chunk, block_info=None, **kwargs):
+    """
+    Parallel worker for fast vectorized UMR numerical integration across a Dask chunk.
+    """
+    from opentof.mass_calibration import apply_mass_calibration
+
+    start_idx = block_info[0]['array-location'][0][0]
+    n_spectra = chunk.shape[0]
+
+    cal_res = kwargs['calibration_results']
+    nm_list = kwargs['nm_list']
+    sample_index_axis = kwargs['sample_index_axis']
+    tof_axis = kwargs['tof_axis']
+    nm_search_range = kwargs.get('nm_search_range', 0.5)
+
+    out_width = 1 + len(nm_list)
+    results = np.zeros((n_spectra, out_width), dtype=np.float64)
+    results[:, 0] = np.arange(start_idx, start_idx + n_spectra)  # Col 0 = MS_index
+
+    interval_indices = cal_res['interval_indices'][start_idx : start_idx + n_spectra]
+    unique_intervals = np.unique(interval_indices)
+
+    for interval_id in unique_intervals:
+        if np.isnan(interval_id):
+            continue
+
+        local_mask = (interval_indices == interval_id)
+        spectra_block = chunk[local_mask, :]
+
+        params = cal_res['batch_params'][int(interval_id)]
+        mode = cal_res.get('mass_cal_mode', 2)
+        mass_axis = apply_mass_calibration(sample_index_axis, params, mode=mode)
+
+        for col_idx, nm in enumerate(nm_list, start=1):
+            mask = (mass_axis >= (nm - nm_search_range)) & (mass_axis <= (nm + nm_search_range))
+            if not np.any(mask):
+                continue
+
+            sub_intensity = spectra_block[:, mask]
+            sub_tof = tof_axis[mask]
+
+            if len(sub_tof) > 1:
+                # Numerical integration step dx across TOF (ns)
+                dx = np.gradient(sub_tof)
+                # Vectorized matrix product for all spectra in local_mask simultaneously
+                results[local_mask, col_idx] = sub_intensity @ dx
+
+    return results
+
+
+def full_umr_integration(tofdata_subtracted, calibration_results, sample_index_axis, 
+                         tof_axis, nm_list, nm_search_range=0.5, 
+                         chunk_size=1000, verbose=True):
+    """
+    Perform parallel UMR integration over a sequence of nominal masses using Dask map_blocks.
+    """
+    nm_list = [int(x) for x in nm_list]
+    out_cols = ["MS_index"] + [f"UMR_NM_{nm}_area" for nm in nm_list]
+
+    if chunk_size:
+        tofdata_subtracted = tofdata_subtracted.rechunk({0: chunk_size})
+
+    if verbose:
+        print(f"Integrating UMR signals for {len(nm_list)} nominal masses across {tofdata_subtracted.shape[0]} spectra...")
+
+    with ProgressBar() if verbose else dask.config.set():
+        final_array = tofdata_subtracted.map_blocks(
+            _umr_map_worker,
+            calibration_results=calibration_results,
+            nm_list=nm_list,
+            sample_index_axis=sample_index_axis,
+            tof_axis=tof_axis,
+            nm_search_range=nm_search_range,
+            dtype='float64',
+            chunks=(tofdata_subtracted.chunks[0], len(out_cols))
+        ).compute()
+
+    return pd.DataFrame(final_array.reshape(-1, len(out_cols)), columns=out_cols)
