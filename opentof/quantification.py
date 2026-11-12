@@ -786,13 +786,13 @@ def quantify_signal(peak_area_array, cycling_dict=None,
         working_array = np.asarray(peak_area_array, dtype=float).copy()
 
     # --- Step 2: Cycling Telemetry Inspection ---
-    # Check if instrument cycling was active during this deployment
+    # Accept either a 1D flag array (e.g., Deployment.quantification_flags) or a legacy {'type': ...} dict
+    raw_cycling_flags = cycling_dict.get('type', None) if isinstance(cycling_dict, dict) else cycling_dict
     has_valid_cycling = (
-        cycling_dict is not None and 
-        'type' in cycling_dict and 
-        np.any(np.isin(cycling_dict['type'], [1, 4]))
+        raw_cycling_flags is not None and
+        np.any(np.isin(raw_cycling_flags, [1, 4]))
     )
-    cycling_flags_type = cycling_dict['type'] if has_valid_cycling else np.full(len(working_array), -1)
+    cycling_flags_type = np.asarray(raw_cycling_flags) if has_valid_cycling else np.full(len(working_array), -1)
 
     # Pre-initialize baseline and diagnostic containers to guarantee clean references
     background_line = np.zeros_like(working_array, dtype=float)

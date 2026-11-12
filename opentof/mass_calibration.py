@@ -21,6 +21,10 @@ from scipy.interpolate import PchipInterpolator
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d, minimum_filter
 import scipy.signal as signal
+from scipy.ndimage import gaussian_filter1d, minimum_filter, minimum_filter1d, uniform_filter1d
+from scipy.interpolate import interp1d
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 import time
@@ -799,7 +803,8 @@ def run_mass_calibration(tofdata,
                     interval_rejects_count += 1
                 else:
                     break
-            
+
+            # # Leaving this commented out for now as 
             # try:
             batch_params.append(params)
             # except UnboundLocalError:
@@ -1785,27 +1790,35 @@ def reference_spectrum_window(timestamps,
     raw_metrics = {}
     ranked_metrics = {}
 
+    # Evaluate each requested stability / accuracy metric over rolling time windows
     for method in methods_weights_dict.keys():
         if method == "std":
+            # Measure standard deviation within window
             metric_series = ts.rolling(f"{window_seconds}s").std()
         elif method == "var":
+            # Measure rolling variance within window
             metric_series = ts.rolling(f"{window_seconds}s").var()
         elif method == "range":
+            # Measure total range (max - min) of deviation within window
             metric_series = ts.rolling(f"{window_seconds}s").apply(
                 lambda x: np.nanmax(x) - np.nanmin(x), raw=True
             )
         elif method == "mad":
+            # Measure Median Absolute Deviation within window
             metric_series = ts.rolling(f"{window_seconds}s").apply(
                 lambda x: np.nanmedian(np.abs(x - np.nanmedian(x))), raw=True
             )
         elif method == "zero":
+            # Measure closeness of window rolling mean to zero PPM error
             rolling_mean = ts.rolling(f"{window_seconds}s").mean()
             metric_series = rolling_mean.abs()
         elif method == "median":
+            # Measure closeness of window rolling mean to global median PPM error
             med = np.nanmedian(ppm_deviation)
             rolling_mean = ts.rolling(f"{window_seconds}s").mean()
             metric_series = (rolling_mean - med).abs()
         elif method == "sip_dep":
+            # Evaluates the Sample Index Position spread for mass calibration instability 
             if sip_dep_sorted is None:
                 raise ValueError("Method 'sip_dep' requested in methods_weights_dict, "
                                  "but local_sip_dep_series was not provided.")
@@ -2708,6 +2721,182 @@ def determine_baseline(intensity_spectrum,
         plt.close()
 
     return baseline_adjusted_spectrum, low_pass_data, smoothed_baseline, adjusted_baseline, global_noise_level, med_diff, #avg_abs_distance
+
+def determine_baseline_surface(spectra, 
+                            cutoff_freq=5e7, 
+                            fs=1e9, 
+                            order=1, 
+                            window_size=None, 
+                            smoothing_window=10, 
+                            noise_percentile=10, 
+                            noise_scaling=1.0):
+    """
+    Fast, fully vectorized baseline and noise floor estimation.
+    Accepts either a 1D spectrum of shape (N,) or a 2D batch of spectra of shape (M, N).
+    Operates in compiled C-extensions across contiguous memory slices.
+
+    Parameters
+    ----------
+    spectra : numpy.ndarray
+        1D or 2D array of raw spectral intensities.
+    cutoff_freq : float, default=5e7
+        Cutoff frequency in Hz for low-pass Butterworth filtering.
+    fs : float, default=1e9
+        Sampling frequency in Hz.
+    order : int, default=1
+        Butterworth filter order.
+    window_size : int or None, default=None
+        Sliding minimum and rolling variance window length (bins).
+    smoothing_window : float, default=10
+        Standard deviation (sigma) for Gaussian baseline smoothing.
+    noise_percentile : float, default=10
+        Percentile of rolling standard deviation used to set noise floor.
+    noise_scaling : float, default=1.0
+        Multiplier applied to the estimated noise floor when elevating the baseline.
+
+    Returns
+    -------
+    adjusted_baseline : numpy.ndarray
+        Elevated baseline matching input dimensions.
+    noise_level : float or numpy.ndarray
+        Estimated noise standard deviation (scalar for 1D, 1D array of shape (M,) for 2D).
+    """
+    data = np.asarray(spectra, dtype=np.float32)
+    is_1d = (data.ndim == 1)
+    if is_1d:
+        data = data[np.newaxis, :]
+
+    n_samples = data.shape[-1]
+    if window_size is None:
+        window_size = max(3, int(n_samples * 0.001))
+
+    # 1. Zero-phase Butterworth low-pass filter along axis=-1
+    wn = cutoff_freq / (fs / 2.0)
+    b, a = signal.butter(order, wn, btype='low', analog=False)
+    low_pass_data = signal.filtfilt(b, a, data, axis=-1, padtype='odd').astype(np.float32)
+
+    # 2. Vectorized running minimum filter (O(N) in C)
+    baseline = minimum_filter1d(low_pass_data, size=window_size, axis=-1, mode='nearest')
+
+    # 3. Vectorized Gaussian smoothing
+    smoothed_baseline = gaussian_filter1d(baseline, sigma=smoothing_window, axis=-1, mode='nearest')
+
+    # 4. Zero-copy rolling noise floor estimation: Var(X) = E[X^2] - (E[X])^2
+    mean_val = uniform_filter1d(data, size=window_size, axis=-1, mode='reflect')
+    mean_sq = uniform_filter1d(data**2, size=window_size, axis=-1, mode='reflect')
+    var = np.maximum(0.0, mean_sq - mean_val**2)
+    dof_factor = window_size / max(1, window_size - 1)
+    rolling_std = np.sqrt(var * dof_factor)
+
+    noise_level = np.percentile(rolling_std, noise_percentile, axis=-1, keepdims=True)
+
+    # 5. Baseline elevation
+    adjusted_baseline = smoothed_baseline + (noise_scaling * noise_level)
+
+    if is_1d:
+        return adjusted_baseline.squeeze(0), float(noise_level.item())
+
+    return adjusted_baseline, noise_level.squeeze(-1)
+
+
+def _interpolate_baseline_surface(row_indices, sample_indices, sampled_baselines):
+    """
+    High-speed vectorized linear interpolation along axis 0 for arbitrary writebuf rows.
+    Avoids class instantiation overhead and keeps workers 100% picklable.
+    """
+    rows = np.asarray(row_indices, dtype=np.float32)
+    k = np.searchsorted(sample_indices, rows, side='right') - 1
+    k = np.clip(k, 0, len(sample_indices) - 2)
+    x0 = sample_indices[k]
+    x1 = sample_indices[k + 1]
+    denom = np.maximum(1e-6, (x1 - x0).astype(np.float32))
+    alpha = ((rows - x0) / denom)[:, np.newaxis]
+    return ((1.0 - alpha) * sampled_baselines[k] + alpha * sampled_baselines[k + 1]).astype(sampled_baselines.dtype)
+
+
+def _subtract_baseline_surface_worker(chunk, block_info=None, sample_indices=None, sampled_baselines=None):
+    """
+    Dask map_blocks worker for lazy, out-of-core baseline surface subtraction.
+    Evaluates only the active chunk rows on-demand.
+    """
+    if block_info is None or not block_info:
+        return chunk
+    start_idx, end_idx = block_info[0]['array-location'][0]
+    row_indices = np.arange(start_idx, end_idx)
+    chunk_baseline = _interpolate_baseline_surface(row_indices, sample_indices, sampled_baselines)
+    return chunk - chunk_baseline
+
+
+def plot_baseline_surface(mass_axis, 
+                          adjusted_baselines, 
+                          timestamps=None, 
+                          sample_indices=None,
+                          output_dir=None, 
+                          plot_filename='baseline_surface.png', 
+                          show_plot_flag=True, 
+                          plt_log_flag=True,
+                          plt_y_min=1e-3,
+                          plt_y_max=None,
+                          xlim=None,
+                          cmap='Spectral',
+                          alpha=0.35,
+                          dpi=150):
+    """
+    Generate a diagnostic visualization of the baseline surface over the acquisition timeline.
+    Displays a similar time-color gradient deployed in OpenTof's mass calibration spline plot.
+    """
+    if output_dir is None:
+        output_dir = get_default_plot_dir()
+    ensure_dir(output_dir)
+
+    n_lines = adjusted_baselines.shape[0]
+    color_map = plt.get_cmap(cmap)
+
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=dpi)
+
+    for i in range(n_lines):
+        color_val = i / max(1, n_lines - 1)
+        ax.plot(mass_axis, adjusted_baselines[i, :], color=color_map(color_val), alpha=alpha, linewidth=0.9)
+
+    ax.set_xlabel("Mass Axis (m/z)", fontweight="bold")
+    ax.set_ylabel("Intensity (ions/s)", fontweight="bold")
+    ax.set_title(f"Baseline Surface ({n_lines} Sampled Spectra)", fontsize=12, fontweight="bold")
+    ax.grid(True, alpha=0.3, linestyle="--")
+
+    if plt_log_flag:
+        ax.set_yscale('log')
+
+    if xlim is not None:
+        ax.set_xlim(xlim)
+
+    if plt_y_min is not None or plt_y_max is not None:
+        ax.set_ylim(plt_y_min, plt_y_max)
+
+    # Colorbar matching the mass calibration spline timeline
+    sm = cm.ScalarMappable(cmap=color_map, norm=mcolors.Normalize(vmin=0, vmax=max(1, n_lines - 1)))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, pad=0.02)
+
+    if timestamps is not None and len(timestamps) == n_lines:
+        ts_series = pd.to_datetime(timestamps)
+        tick_locs = np.linspace(0, n_lines - 1, min(6, n_lines))
+        cbar.set_ticks(tick_locs)
+        cbar.set_ticklabels([ts_series[int(idx)].strftime('%m-%d %H:%M') for idx in tick_locs])
+        cbar.set_label("Acquisition Time (UTC) [timestamps]", fontweight="bold")
+    elif sample_indices is not None and len(sample_indices) == n_lines:
+        tick_locs = np.linspace(0, n_lines - 1, min(6, n_lines))
+        cbar.set_ticks(tick_locs)
+        cbar.set_ticklabels([str(int(sample_indices[int(idx)])) for idx in tick_locs])
+        cbar.set_label("Spectrum Writebuf Index", fontweight="bold")
+    else:
+        cbar.set_label("Timeline Progression", fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, plot_filename), bbox_inches='tight')
+
+    if show_plot_flag:
+        plt.show()
+    plt.close()
 
 def get_mass_axis_for_ms_i(ms_i, calibration_results, sample_indexes):
     """
