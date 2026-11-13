@@ -124,7 +124,7 @@ class Deployment:
         self.segment_profiles = segment_profiles
         self.reagent_ion = reagent_ion
         self.plot_dir = plot_dir
-        self._default_plot_subdir = None
+        self._plot_subdir = None
 
         # State flags and corruption tracking masks
         self._user_entered_cycling_flag = False
@@ -574,7 +574,7 @@ class Deployment:
         return self._timestamps_cache
 
     @property
-    def default_plot_subdir(self):
+    def plot_subdir(self):
         """
         Return the active plot sub-directory string.
 
@@ -587,8 +587,8 @@ class Deployment:
         str
             Plot sub-directory name or relative path string.
         """
-        if getattr(self, '_default_plot_subdir', None) is not None:
-            return self._default_plot_subdir
+        if getattr(self, 'plot_subdir', None) is not None:
+            return self._plot_subdir
 
         if len(self.timestamps) > 0:
             try:
@@ -598,20 +598,20 @@ class Deployment:
                 pass
         return "OpenTof_Run"
     
-    @default_plot_subdir.setter
-    def default_plot_subdir(self, value):
+    @plot_subdir.setter
+    def plot_subdir(self, value):
         """
         Set a custom default plot sub-directory from a ``str`` or ``pathlib.Path``.
 
         Pass ``None`` to revert to the automatic run-timestamp sub-directory.
         """
         if value is None:
-            self._default_plot_subdir = None
+            self._plot_subdir = None
         elif isinstance(value, (str, os.PathLike)):
-            self._default_plot_subdir = os.fspath(value)
+            self._plot_subdir = os.fspath(value)
         else:
             raise TypeError(
-                f"default_plot_subdir must be a str, pathlib.Path, or None, got {type(value).__name__}."
+                f"plot_subdir must be a str, pathlib.Path, or None, got {type(value).__name__}."
             )
 
     @property
@@ -646,7 +646,7 @@ class Deployment:
 
         Values follow OpenTof cycling conventions (``0`` = ambient, ``1`` = auto-zero,
         ``4`` = sensitivity cal, ``-1`` = transient/aborted). Falls back to
-        ``self.cycling_status['type']`` if physical telemetry was not derived.
+        ``self._cycling_status['type']`` if physical telemetry was not derived.
 
         Returns
         -------
@@ -985,15 +985,16 @@ class Deployment:
         Build instrument cycling status tables.
         
         Populates:
-          - self._cycling_status: Clean scheduled/DAQ cycling table for spectral filtering,
-            reference spectra determination, and baseline evaluation.
+          - self._cycling_status: scheduled cycling table for spectral labeling.
+            Notes periods of nonambient acquisition and labels accordingly.
           - self._quantification_flags: Physical telemetry-derived cycling states based on
-            MFC flows and valve sensors, used in signal quantification.
+            MFC flows and valve sensors present in .h5 metadata, used in 
+            automation of the signal quantification process.
         """
         n_spectra = len(self.timestamps)
         
         # -------------------------------------------------------------
-        # 1. Extract Programmed Table & Legacy Corrections (Scheduled Truth)
+        # 1. Extract Scheduled Cycling Table 
         # -------------------------------------------------------------
         combined = {}
         self.extract_cycling_flags()
@@ -1105,9 +1106,9 @@ class Deployment:
 
                 # Phase 1 (Auto-Zero Air): Zero valve open & zero air flowing (Cal OFF)
                 if zero_valve is not None:
-                    is_zero = (zero_valve & zero_flowing) & ~is_cal
+                    is_zero = (zero_valve & zero_flowing) & np.logical_not(is_cal)
                 elif zero_flow is not None:
-                    is_zero = zero_flowing & ~is_cal
+                    is_zero = zero_flowing & np.logical_not(is_cal)
                 else:
                     is_zero = np.zeros(n_spectra, dtype=bool)
 
@@ -1710,7 +1711,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         **kwargs : dict
             Additional keyword arguments passed to :func:`run_mass_calibration` or 
             auxiliary plotting routines (e.g., `precomputed_gad`).
@@ -1738,7 +1739,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix from instance property if unassigned
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
             
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -1898,7 +1899,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         plot_flag : bool, default=True
             If ``True``, renders and saves diagnostic reference spectrum and TOF drift figures.
         show_plot_flag : bool, default=True
@@ -1941,7 +1942,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
             
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -2025,7 +2026,7 @@ class Deployment:
         if output_dir is None:
             output_dir = getattr(self, 'plot_dir', None) or get_default_plot_dir()
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
             
         final_plot_dir = os.path.join(output_dir, plot_subdir)
         kwargs['output_dir'] = final_plot_dir
@@ -2199,7 +2200,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         show_plot_flag : bool, default=True
             If ``True``, displays generated diagnostic plots interactively.
         **kwargs : dict
@@ -2234,7 +2235,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -2306,7 +2307,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         show_plot_flag : bool, default=True
             If ``True``, displays generated diagnostic plots interactively.
         **kwargs : dict
@@ -2339,7 +2340,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -3626,7 +3627,7 @@ class Deployment:
         This wrapper automates the retrieval of inputs required for the quantification backend.
         It automatically extracts flow arrays from the Mass Flow Controllers (MFCs) in `self.tps2`, 
         locates the integrated area of the target peak from `self.peak_data`, and feeds the 
-        instrument's cycling telemetry (`self.cycling_status`) into the processor.
+        instrument's cycling telemetry (`self._cycling_status`) into the processor.
 
         Parameters
         ----------
@@ -3750,7 +3751,7 @@ class Deployment:
         if output_dir is None:
             output_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         # --- 5. Call Backend Code ---
         ppb_bc, sens_axis, bg_corr, working_arr = backend_quantify(
@@ -3890,7 +3891,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         n_jobs : int, default=1
             Number of parallel execution worker processes.
         **kwargs : dict
@@ -3927,7 +3928,7 @@ class Deployment:
             output_dir = getattr(self, 'plot_dir', None) or get_default_plot_dir()
             
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
             
         output_dir = os.path.join(output_dir, plot_subdir)
         if save_plot_flag and not os.path.exists(output_dir):
@@ -4502,7 +4503,7 @@ class Deployment:
                 output_dir = get_default_plot_dir()
             
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         self.populate_nm_data_for(nm)
 
@@ -4988,8 +4989,8 @@ class Deployment:
                 f.attrs["reagent_ion"] = str(self.reagent_ion)
             if self.plot_dir is not None:
                 f.attrs["plot_dir"] = str(self.plot_dir)
-            if getattr(self, '_default_plot_subdir', None) is not None:
-                f.attrs["default_plot_subdir"] = str(self._default_plot_subdir)
+            if getattr(self, '_plot_subdir', None) is not None:
+                f.attrs["plot_subdir"] = str(self._plot_subdir)
             if self.segment_profiles is not None:
                 clean_profiles = {
                     k: (v.tolist() if isinstance(v, np.ndarray) else v)
@@ -5594,8 +5595,8 @@ class Deployment:
                 self.reagent_ion = str(h5.attrs["reagent_ion"])
             if "plot_dir" in h5.attrs:
                 self.plot_dir = str(h5.attrs["plot_dir"])
-            if "default_plot_subdir" in h5.attrs:
-                self._default_plot_subdir = str(h5.attrs["default_plot_subdir"])
+            if "plot_subdir" in h5.attrs:
+                self._plot_subdir = str(h5.attrs["plot_subdir"])
             if "segment_profiles" in h5.attrs:
                 self.segment_profiles = json.loads(h5.attrs["segment_profiles"])
 
@@ -6014,7 +6015,7 @@ class Deployment:
         ----------
         output_filepath : str or pathlib.Path or None, default=None
             Target file path for the exported `.txt` file. Defaults to ``"tofware_peak_list.txt"`` 
-            inside `self.plot_dir` / `default_plot_subdir` if ``None``.
+            inside `self.plot_dir` / `plot_subdir` if ``None``.
 
         Returns
         -------
@@ -6103,7 +6104,7 @@ class Deployment:
         # Resolve output text file path
         if output_filepath is None:
             base_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
-            out_path = Path(base_dir) / self.default_plot_subdir / "tofware_peak_list.txt"
+            out_path = Path(base_dir) / self.plot_subdir / "tofware_peak_list.txt"
         else:
             out_path = Path(output_filepath)
 

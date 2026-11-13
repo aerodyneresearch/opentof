@@ -27,10 +27,10 @@ d = ot.Deployment.from_directory(deployment_dir_path)
 """
 Step 1/6: Loading .h5 files
 Step 2/6: Determining Instrument Type
-Step 3/6: Populating deployment.cycling_status
-Step 4/6: Building deployment.tofdata
-Step 5/6: Calculating deployment.first_guess_mass_axis
-Step 6/6: Enforcing global chronological order
+Step 3/6: Building deployment.tofdata
+Step 4/6: Calculating deployment.first_guess_mass_axis
+Step 5/6: Enforcing global chronological order
+Step 6/6: Populating deployment.cycling_status
 """
 ```
 
@@ -46,7 +46,7 @@ We can see that our files were read in sucessfully, but lets briefly break down 
 
 5. "Enforcing global chronological order" - This step simply checks whether the `Deployment.timestamps` array is sorted by increasing time, and if not triggers a sort that reindexes writebufs (and associated variables aligned with writebufs) in a way that achieves this. Note: Enforcing chronological order here guarantees that time-series telemetry (like MFC flows) aligns with the spectral data in the next step.
 
-6. "Building deployment.cycling_status" - This step determines the active instrument cycling state (Ambient, Auto-Zero, or Sensitivity Calibration) by establishing a hierarchy of ground truth. Rather than blindly trusting the scheduled DAQ sequence, OpenTof first looks at the physical telemetry (Mass Flow Controllers and solenoid valve states in Deployment.tps2) to determine exactly when zero air or calibration gas was actually flowing into the instrument. If physical telemetry is unavailable, it falls back to the programmed DAQ tables ("Cycling_Status" or "Corrections").
+6. "Building deployment.cycling_status" - This step constructs two independent versions of the instrument's real-time cycling table, one reading the "scheduled" information from the original "/Cycling_Status" .h5 dataset, and one based on the presense of variables within the "/TPS2" .h5 dataset (stored in `Deployment.tps2`) matching keywords like "zero", "cal", "mfc", and "valve". This step results in the creation of `Deployment.cycling_status` (that has a useful key: "type") and `Deployment.quantification_flags`, which are combined in a "worst-case" union (assuming any discrepancy or valve-switching transient flagged by either source is excluded from having an ambient label) to produce `Deployment.standard_acquisition_data` and its logical inverse `Deployment.nonstandard_acquisition_data`. These binary masking arrays are writebuf/MS_index aligned and are very useful when plotting/filtering for just ambient data.
 
 Now that we know roughly what happens at the time of initialization, lets explore some key attributes of the Deployment object that can help us understand it's contents!
 
@@ -115,6 +115,8 @@ plt.show()
 
 **IMPORTANT NOTE!** The first dimension of the `Deployment.tofdata` dataset (`8194` in our example) is an important quantity within OpenTof. This axis is also the same length as the 1D numpy array `Deployment.timestamps` representing the time a spectra was recorded by the instrument. However, throughout this documention when we are referring to a specific index position along this axis, this index position is often called a "writebuf" or a "MS_index" (mass spectrum index). These terms are interchangable and equivilent.
 
+Technical note: An associated variable to `Deployment.tofdata` is `Deployment.tofdata_subtracted` which is ultimately the version of this dataset that is passed to full fitting an integration (`FFI`) functions! 
+
 ### Deployment._averaged_dataset
 
 The `Deployment._averaged_dataset` attribute is responsible for storing an averaged version of the original `Deployment.tofdata` dataset. The averaged dataset is generated and stored automatically during procedures like `Deployment.mass_calibration`, but a new averaged dataset can be manually requested via [Deployment.generate_averaged_dataset](#Deployment.generate_averaged_dataset).
@@ -154,24 +156,78 @@ target_index_mask = d._averaged_dataset[2] == interval_index
 filtered_spectra = d.tofdata[target_index_mask, :]
 ```
 
-### Deployment.plot_dir and Deployment.default_plot_prefix
+### Deployment.cycling_status, Deployment.quantification_flags, and Deployment.standard_acquisition_data
+
+OpenTof tracks instrument operating states across every writebuf using three complementary attributes:
+
+1. `Deployment.cycling_status` : A dictionary containing the **DAQ-scheduled** cycling table arrays (primarily `d.cycling_status['type']`, where `0` = Ambient, `1` = Auto-Zero, `4` = Sensitivity Calibration, and `-1` = transient/unassigned).
+2. `Deployment.quantification_flags` : A 1D NumPy array derived from **physical telemetry** (Mass Flow Controllers and solenoid valve states in `Deployment.tps2`), falling back to `d.cycling_status['type']` if physical telemetry is unavailable. This is the primary flag array read by `Deployment.quantify_signal` to locate auto-zero and calibration blocks.
+3. `Deployment.standard_acquisition_data` (and its binary inverse `Deployment.nonstandard_acquisition_data`) : A 1D boolean mask where `True` indicates valid ambient sample acquisition spectra. By default, this mask acts as a **worst-case union** across both `d.cycling_status['type']` and `d.quantification_flags`, while also masking out corrupted writebufs and all-zero spectra.
+
+You can inspect how these arrays align across a deployment:
+
+```python
+# Inspect scheduled cycling table vs. physical telemetry flags
+print("Scheduled types:", np.unique(d.cycling_status['type'], return_counts=True))
+print("Physical flags :", np.unique(d.quantification_flags, return_counts=True))
+
+# Check fraction of deployment classified as standard ambient acquisition
+print(f"Standard acquisition coverage: {np.mean(d.standard_acquisition_data) * 100:.1f}%")
+```
+
+**Manually Overriding Quantification Flags and Standard Acquisition Masks**
+
+If an instrument ran an unlogged zero/calibration sequence, a solenoid valve stuck without registering in telemetry, or you want to exclude a specific maintenance window from ambient analysis, you can manually override these arrays (provided the replacement array is writebuf/MS_index algined, which means matches `len(d.timestamps)`)
+
+```python
+# Manually override quantification_flags (e.g., to define custom zero/cal periods for quantify_signal)
+# Codes: 0 = Ambient, 1 = Auto-Zero, 4 = Sensitivity Cal, -1 = Transient/Ignore
+custom_q_flags = d.quantification_flags.copy()
+
+# Example: Flag a manual zero air period between two timestamps
+manual_zero_mask = (d.timestamps >= np.datetime64("2026-03-13T16:00:00")) & (
+    d.timestamps <= np.datetime64("2026-03-13T16:10:00")
+)
+custom_q_flags[manual_zero_mask] = 1
+
+# Assigning quantification_flags automatically updates standard_acquisition_data
+# (via the worst-case union) and syncs Deployment.peak_data if already populated
+d.quantification_flags = custom_q_flags
+```
+
+If you want full manual control over which spectra are treated as valid ambient data—bypassing the automatic union of `cycling_status` and `quantification_flags`—you can assign a 1D boolean mask directly to `d.standard_acquisition_data` (or `d.nonstandard_acquisition_data`)
+
+```python
+# 2. Manually override standard_acquisition_data directly
+# Start from the existing mask and exclude a custom time window (e.g., inlet maintenance)
+custom_std_mask = d.standard_acquisition_data.copy()
+maintenance_mask = (d.timestamps >= np.datetime64("2026-03-13T17:15:00")) & (
+    d.timestamps <= np.datetime64("2026-03-13T17:25:00")
+)
+custom_std_mask[maintenance_mask] = False
+
+# Setting standard_acquisition_data sets an explicit manual override
+# (corrupt and all-zero spectra remain excluded automatically)
+d.standard_acquisition_data = custom_std_mask
+```
+
+**Important Note:** Setting `d.standard_acquisition_data` (or `d.nonstandard_acquisition_data`) directly activates a manual override flag (`_user_entered_cycling_flag = True`) so subsequent changes to `quantification_flags` do not overwrite your custom ambient mask. If `Deployment.peak_data` has already been computed, updating either `d.quantification_flags` or `d.standard_acquisition_data` will automatically refresh the corresponding columns in `d.peak_data`
+
+### Deployment.plot_dir and Deployment.plot_subdir
 
 OpenTof will often produce plots with its functions to aid in visualizing the performed operation. 
 
-where plots our outputted for a current Deployment can be specifed by passing a string path to `Deployment.plot_dir` which is `None` by default.
+Where plots our outputted for a current analysis can be specifed by passing a string path to `Deployment.plot_dir` which is `None` by default.
 
 If Deployment.plot_dir is still `None` by the time a plot is produced, the plot will automatcially save itself under a newly created "OpenTof" folder in the user's home base directory according to the `get_default_plot_dir` function from `utils.py`.
 
-In addition to specified a `plot_dir` the Deployment object also has an attribute: `d.default_plot_subdir` which is populated by default as a string of the first timestamp (format: "yyyymmdd_hhmmss") of the Deployment (from `d.timestamps`). This is generally used to create a sub-directory underneat the main `plot_dir` with information for a particular Deployment. 
+In addition to specified a `plot_dir` the Deployment object also has an attribute: `d.plot_subdir` which is populated by default as a string of the first timestamp (format: "yyyymmdd_hhmmss") of the Deployment (from `d.timestamps`). This is used to create a sub-directory underneath the main `plot_dir` with information for a particular Deployment. 
 
-If it is your first time running OpenTof leave these at their default values!
-
-Some keywords to look out for when exploring the source code are:
+Some keywords to look out for related to data saving when exploring the source code are:
 
 - `show_plot_flag` : Which generally triggers `plt.show()` for the current plot
 - `save_plot_flag` : Which can be set to `True` to save the figure (will save at default location unless specified)
 - `output_dir` : Can be supplied manually with a String variable to override the default plot directory name (`d.plot_dir` if `None` then ot.)
-- `plot_subdir` : Can be supplied mannually with a String variable to override the default plot sub-directory name (`d.default_plot_subdir`) that a plot gets saved in.
 
 If defaults are not modified from their original values OpenTof will produce plots at the following file locations (assuming a Windows operating system):
 
@@ -179,14 +235,14 @@ Plots produced by OpenTof will be saved to a subdirectory within:
 
 `C:\Users\user\OpenTof` <- this is `d.plot_dir` by default
 
-With all plots going into a sub-directory named after the String within `Deployment.default_plot_subdir`. For our 2026.03.13 example the default path would be:
+With all plots going into a sub-directory named after the String within `Deployment.plot_subdir`. For our 2026.03.13 example the default path would be:
 
-`C:\Users\user\OpenTof\20260313_143039`
+`C:\Users\user\OpenTof\20260313_143039` <- this is an example of a default `d.plot_subdir`
 
 
 ## High Resolution Time Series (HRTS) Wrapper Functions
 
-What makes up the "core" functionality of OpenTof are a series of methods contained within the Deployment class. When these functions are chained together they make up a workflow that produces a high resolution time series. Previous users of Tofware will find many similarities to the "HRTS" IGOR Procedure/Workflow. Each method will be demonstrated here with a few examples of some other options users may find helpful when trying out OpenTof on their own data.
+What makes up the "core" functionality of OpenTof are a series of methods contained within the Deployment class. When these functions are called together they make up a workflow that produces a high resolution time series. Previous users of Tofware will find many similarities to the "HRTS" IGOR Procedure/Workflow. Each method will be demonstrated here with a few examples of some other options users may find helpful when trying out OpenTof on their own data.
 
 ### Deployment.mass_calibration
 
@@ -652,7 +708,12 @@ d.FFI_constrained(peak_type='custom')
 """
 ```
 
-The output of this function populates `Deployment.peak_data` with type `pandas.DataFrame`. This dataframe has a "wide" format where each peak within `Deployment.peak_list` will have both an associated `"{peak_name}_amplitude"` and `"{peak_name}_area"` column where `{peak_name}` is replaced with something like `"C6H6+"`.
+The output of this function populates `Deployment.peak_data` with type `pandas.DataFrame`. This dataframe has a "wide" format where each peak within `Deployment.peak_list` will have both an associated `"{peak_name}_amplitude"` and `"{peak_name}_area"` column where `{peak_name}` is replaced with something like `"C6H6+"`. Additionally, other writebuf/MS_index aligned Deployment metadata is also stored by default as a column within `Deployment.peak_data` for quick access and straighforward saving with `d.peak_data.to_csv(index=False)`. 
+
+- "timestamp" <- aligned datetime64[ns] values from `Deployment.timestamps`
+- "standard_acquisition_data" <- boolean ambient mask from `Deployment.standard_acquisition_data`
+- "cycling_status" <- scheduled cycling array from `Deployment.cycling_status['type']`
+- "quantification_flags" <- physical telemetry derived cycling array from `Deployment.quantification_flags`
 
 We can make a pretty plot of the fit results using code similar to the plotting code below!
 
@@ -724,7 +785,12 @@ Parallelizing unconstrained fit over 14 peaks across 8194 spectra via Dask...
 
 As you can see, the unconstrained fitter takes significantly longer, however the unconstrained fitting and integration is now complete! If you see a way to speed up the unconstrained fitter be sure to submit a pull request, see [contributing.md](../contributing.md) for more details.
 
-The contents of `d.peak_data` will be slightly different depending on whether the unconstrained or constrained fitter was used to fit the Deployment. Whereas the constrained fitter returns a dataframe where each peak in the active peak list has only an `_amplitude` and  `_area` column, in the unconstrained fitter there are the additional columns of `_center_mass` and `_fwhm_mass` which are the fitted peak center and FWHM in mass space.
+The output of this function also populates `Deployment.peak_data` similarly to the constrained fitter but instead with columns `_amplitude`, `_area`,  `_center_mass` and `_fwhm_mass` which correspond to the respective unconstrained peak fit parameters. Identically to `FFI_constrained` other writebuf/MS_index aligned Deployment metadata is also stored by default as a column within `Deployment.peak_data` for quick access and straighforward saving with `d.peak_data.to_csv(index=False)`. 
+
+- "timestamp" <- aligned datetime64[ns] values from `Deployment.timestamps`
+- "standard_acquisition_data" <- boolean ambient mask from `Deployment.standard_acquisition_data`
+- "cycling_status" <- scheduled cycling array from `Deployment.cycling_status['type']`
+- "quantification_flags" <- physical telemetry derived cycling array from `Deployment.quantification_flags`
 
 We can use the same plotting code from the `FFI_constrained` block to plot the results of the unconstrained fit as well.
 
@@ -785,6 +851,13 @@ plt.close()
 
 ![Integrated_UMR_Timeseries](../assets/images/deployment_md/deployment_integrate_UMR.png)
 
+Identically to `FFI_constrained` other writebuf/MS_index aligned Deployment metadata is also stored by default as a column within `Deployment.peak_data` for quick access and straighforward saving with `d.peak_data.to_csv(index=False)`. 
+
+- "timestamp" <- aligned datetime64[ns] values from `Deployment.timestamps`
+- "standard_acquisition_data" <- boolean ambient mask from `Deployment.standard_acquisition_data`
+- "cycling_status" <- scheduled cycling array from `Deployment.cycling_status['type']`
+- "quantification_flags" <- physical telemetry derived cycling array from `Deployment.quantification_flags`
+
 ### Deployment.generate_averaged_dataset
 
 This method acts as a wrapper function around the the `generate_averaged_dataset` function within [mass_calibration.py](../user-guide/mass-calibration.md). This method will process the `averaging_interval` (default=`300`seconds or 5 minutes) parameter and will calculate the averaged dataset based on this interval and the `Deployment.timestamps` attribute.
@@ -840,7 +913,7 @@ Similarly, a different parameter's time-series can be plotted by specifying the 
 
 Note: `paremeter="center"` and `parameter="fwhm"` will throw a `KeyError` if called upon a Deployment.peak_data dataset that was populated with only the `FFI_constrained` function, as these columns are only generated during `FFI_unconstrained`.
 
-By default, this plot will also automatically filter out portions of non-standard acquisition data (via `Deployment.standard_aquisition_data`) but this can be manually overwritten via setting `use_std_acq_data=False`. An example call with expanded inputs is included as an example below.
+By default, this plot will also automatically filter out portions of non-standard acquisition data (via `Deployment.standard_acquisition_data`) but this can be manually overwritten via setting `use_std_acq_data=False`. An example call with expanded inputs is included as an example below.
 
 ```python
 d.plot_peak_data_for("C6H6+", parameter='amplitude', 
@@ -976,9 +1049,10 @@ dict_keys(['nominal_mass', 'mz_segment', 'int_segment', 'total_fit', 'peaks', 'f
 
 ### Deployment.quantify_signal
 
-This is a wrapper function that performs a simple quantification pipline for translating ions/s areas into parts-per-billion concentrations. Sensitivities and calibration tank concentrations are required! This function has proven to be slightly unstable for longer reanalysis and should therefore be used with caution. This function is currently still relatively specialized for use with specific instrument configurations, so it is my hope that it can be made more general in the future. Please consider contributing if you come up with a good solution!
+This is a wrapper function that performs a simple quantification pipline for translating ions/s areas into parts-per-billion concentrations. Sensitivities and calibration tank concentrations are required! The quantification process within OpenTof is currently still relatively specialized as it looks for certain variable names within `Deployment.tps2` meaning that it could yet be different for different instrument configurations, so it is my hope that it can be made more general in the future. Please consider contributing if you come up with a good solution or have a need to incorporate more variables into the procedure!
 
-In addition to performing background subtraction and applying sensitivies across the time-series (in accordance with the defined cycling table), this function also attempts to evaluate the stability of the segments of signal used for these operations as well.
+
+Specifically, this functions read the active `Deployment.quantification_flags` (falling back to `Deployment.cycling_status['type']` if unavailable) to locate auto-zero (`1`) and sensitivity calibration (`4`) blocks. This function also attempts to evaluate the stability of the segments of signal used for these operations as well.
 
 This figure is a good example visualization of this function processing realtime cycling data for methyl ethyl ketone ("MEK"):
 
@@ -1289,14 +1363,14 @@ dask.array<array, shape=(8194, 31104), dtype=float32, chunksize=(1000, 31104), c
 """
 ```
 
-If exporting using `driver="PIF"` to the same directory as the raw data `import_from_h5` can be skipped as OpenTof will automatically read in these directories via `from_deployment`. However, if `"IF"` and `"Proccesed"` files are saved elsewhere, then this method should still be used like so:
+If exporting using `driver="PIF"` to the same directory as the raw data `import_from_h5` can be skipped as OpenTof will automatically read in these directories via `from_directory`. However, if `"IF"` and `"Proccesed"` files are saved elsewhere, then this method should still be used like so:
 
 ```python
 dd = ot.Deployment.from_directory(r"C:\path\to\data\20260508") 
 dd.import_from_h5(r"C:\path\to\data\somewhere_else", driver="PIF")
 ```
 
-### Deployment.export_peak_list_to_Tofware
+### Deployment.export_peak_list_to_tofware
 
 This is a helper function that will export the currently active `Deployment.peak_list` and format it so it can be read into Tofware.
 
