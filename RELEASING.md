@@ -7,13 +7,12 @@ your local checkout.
 Publishing uses **PyPI Trusted Publishing** (OpenID Connect via GitHub
 Actions), so no API tokens or passwords are stored in the repository.
 
-## Key concepts (read once)
+## Key concepts
 
 - **The version number is set manually** in the `version` field of
-  `pyproject.toml` (e.g. `version = "0.1.0"`). The build stamps that exact
-  string into the artifact filenames and metadata. The git tag does **not** set
-  the version — it only triggers the publish. Bump `version` for every release
+  `pyproject.toml` (e.g. `version = "0.4.0"`). The build stamps that exact string into the artifact filenames and metadata. The git tag does **not** set the version — it only triggers the publish. Bump `version` for every release
   and keep it in sync with the tag.
+- Version number in `CITATION.cff` should also be updated
 - **Published versions are immutable.** PyPI and TestPyPI reject re-uploading an
   existing version; you can only publish a new version (and "yank" a bad one).
   This is why the local smoke test below matters.
@@ -109,12 +108,12 @@ Steps:
 3. Create and push a matching tag. Either from the command line:
 
    ```powershell
-   git tag release_testv0.1.0
-   git push origin release_testv0.1.0
+   git tag release_testv0.4.0
+   git push origin release_testv0.4.0
    ```
 
    Or with **TortoiseGit** (Windows GUI): right-click the repo folder →
-   *TortoiseGit → Create Tag...*, set the tag name to `release_testv0.1.0`,
+   *TortoiseGit → Create Tag...*, set the tag name to `release_testv0.4.0`,
    base it on `HEAD (master)`, tick the **Push** option, and click OK. (If you
    leave Push unticked, create the tag then push it separately via
    *TortoiseGit → Push...* with "Include Tags" enabled.) Creating the tag
@@ -158,8 +157,8 @@ up once against the repository you publish from.
 4. **Release** by bumping `version`, running the Part A smoke test, then:
 
    ```powershell
-   git tag release_v0.1.0
-   git push origin release_v0.1.0
+   git tag release_v0.4.0
+   git push origin release_v0.4.0
    ```
 
 5. Verify: `pip install opentof` from a clean environment.
