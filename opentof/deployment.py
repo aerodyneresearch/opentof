@@ -587,7 +587,7 @@ class Deployment:
         str
             Plot sub-directory name or relative path string.
         """
-        if getattr(self, 'plot_subdir', None) is not None:
+        if getattr(self, '_plot_subdir', None) is not None:
             return self._plot_subdir
 
         if len(self.timestamps) > 0:
