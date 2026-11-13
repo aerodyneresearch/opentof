@@ -282,7 +282,7 @@ def ransac_peak_width(reference_spectrum,
             plt.show()
         plt.close()
 
-    return fwhm_fit_coeffs, min_fwhm_fit_coeffs, popt
+    return fwhm_fit_coeffs, min_fwhm_fit_coeffs, popt, filtered_peak_data
 
 def peak_width(reference_spectrum, rs_mass_axis, 
                top_n=150, 
@@ -454,7 +454,7 @@ def peak_width(reference_spectrum, rs_mass_axis,
         plt.close()
 
     # Return the linear fit coefficients
-    return fwhm_fit_coeffs, popt
+    return fwhm_fit_coeffs, popt, filtered_peak_data
 
 # Filter out any peaks if peak if peak FWHM is too small 
 def filter_peaks_by_mass_spacing(peak_data, min_mass_spacing=1.0):

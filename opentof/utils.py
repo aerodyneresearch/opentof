@@ -370,7 +370,8 @@ def std_list_array_lengths(all_segments, mode="pad"):
     # Stack list of uniform 1D arrays into a 2D NumPy array
     return np.array(standardized)
 
-def get_raw_nm_data(nm, tofdata, tof_axis, calibration_results, mode='extrap'):
+def get_raw_nm_data(nm, tofdata, tof_axis, calibration_results, mode='extrap',
+                    chunk_size=1000):
     """
     Extract and standardize spectral segment time series around a nominal mass window.
 
@@ -405,64 +406,69 @@ def get_raw_nm_data(nm, tofdata, tof_axis, calibration_results, mode='extrap'):
     all_tof_segments_std : numpy.ndarray
         Standardized 2D array of time-of-flight axes in nanoseconds.
     """
-    # Import calibration utility locally to break circular module dependencies
     from opentof.mass_calibration import get_mass_axis_for_ms_i
 
-    # Initialize master accumulation lists for extracted nominal mass segments
     all_int_segments = []    # Intensity vectors (y-axis)
     all_ma_segments = []     # Mass-to-charge vectors (x-axis)
-    all_neg2d_segments = []  # Negative second derivative vectors
     all_tof_segments = []    # Time-of-flight vectors (ns)
 
-    chunk_size = 1000
     num_spectra = len(tofdata)
+    num_samples = tofdata.shape[1] if hasattr(tofdata, 'shape') else len(tof_axis)
 
-    # Process dataset in memory-safe chunks to prevent RAM overflow on large Dask arrays
+    # Optimization 1: Allocate sample_indexes ONCE outside all loops
+    sample_indexes = np.arange(num_samples)
+
+    # Optimization 2: Cache mass axis across calibration intervals/batches
+    cached_mass_axis = None
+    last_interval_id = None
+    interval_indices = calibration_results.get("interval_indices", None)
+
+    # Process dataset in chunks
     for chunk_start in range(0, num_spectra, chunk_size):
         chunk_end = min(chunk_start + chunk_size, num_spectra)
         
-        # Pull current block slice into RAM and compute Dask computational graph if required
         working_chunk = tofdata[chunk_start:chunk_end, :]
         if hasattr(working_chunk, 'compute'):
             working_chunk = working_chunk.compute()
             
-        # Iterate through individual spectra within the active memory chunk
         for local_i in range(chunk_end - chunk_start):
-            ms_i = chunk_start + local_i  # Calculate global spectrum index
-            
-            # Extract 1D raw spectrum intensity vector
+            ms_i = chunk_start + local_i
             spectra = working_chunk[local_i]
 
-            # Generate sample index channel array [0, 1, 2, ..., num_samples - 1]
-            sample_indexes = np.arange(len(spectra))
+            # Determine whether the mass axis can be reused from cache
+            if interval_indices is not None:
+                # If interval_indices maps spectrum index to an interval
+                current_interval_id = (
+                    interval_indices[ms_i] 
+                    if hasattr(interval_indices, '__getitem__') and len(interval_indices) == num_spectra 
+                    else None
+                )
+                if current_interval_id is not None and current_interval_id == last_interval_id and cached_mass_axis is not None:
+                    spectra_mass_axis = cached_mass_axis
+                else:
+                    spectra_mass_axis = get_mass_axis_for_ms_i(ms_i, calibration_results, sample_indexes)
+                    cached_mass_axis = spectra_mass_axis
+                    last_interval_id = current_interval_id
+            else:
+                spectra_mass_axis = get_mass_axis_for_ms_i(ms_i, calibration_results, sample_indexes)
 
-            # Reconstruct the calibrated mass-to-charge (m/z) axis for this specific scan
-            spectra_mass_axis = get_mass_axis_for_ms_i(ms_i, calibration_results, sample_indexes)
+            # Slice segment window
+            int_segment, mz_segment, tof_segment = get_nm_segment_data(
+                nm, spectra, spectra_mass_axis, tof_axis
+            )
 
-            # Slice out the local segment window centered around requested nominal mass (nm +/- 0.5 m/z)
-            int_segment, mz_segment, tof_segment = get_nm_segment_data(nm, spectra, spectra_mass_axis, tof_axis)
-
-            # --- Compute Negative Second Derivative (-d^2y / dx^2) ---
-            # 1st derivative (d1) finds slope / rate of change
-            d1 = np.gradient(int_segment)
-            # 2nd derivative (d2) finds curvature / peak tops
-            d2 = np.gradient(d1)
-            # Negating d2 turns concave-down peak maxima into positive concave-up spikes
-            neg2d = -d2
-
-            # Accumulate extracted scan segments into master lists
             all_int_segments.append(int_segment)
             all_ma_segments.append(mz_segment)
-            all_neg2d_segments.append(neg2d)
             all_tof_segments.append(tof_segment)
 
-    # Standardize segment vector lengths to uniform matrix dimensions across all scans
+    # Standardize segment vector lengths across all scans
     all_int_segments_std = std_list_array_lengths(all_int_segments, mode=mode)
     all_ma_segments_std = std_list_array_lengths(all_ma_segments, mode=mode)
-    all_neg2d_segments_std = std_list_array_lengths(all_neg2d_segments, mode=mode)
     all_tof_segments_std = std_list_array_lengths(all_tof_segments, mode=mode)
 
-    # Return standardized 2D segment matrices aligned with global spectrum index (ms_i)
+    # Optimization 3: Compute negative second derivative vectorially on the standardized 2D array
+    all_neg2d_segments_std = -np.gradient(np.gradient(all_int_segments_std, axis=1), axis=1)
+
     return all_int_segments_std, all_neg2d_segments_std, all_ma_segments_std, all_tof_segments_std
 
 def plot_peak_fits(ms_i, nm, tofdata_subtracted, peak_list_df, 

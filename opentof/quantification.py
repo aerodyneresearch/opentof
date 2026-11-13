@@ -374,101 +374,77 @@ def _perform_background_subtraction(zero_blocks, peak_area_array, mode="interp",
 
     # --- PASS 1: Calculate Mean for Each Block & Flag Aborted Sequences ---
     for b_id in neg_blocks:
-        auto_zero_idx_temp = np.where(zero_blocks == b_id)[0]
-        center_idx = np.median(auto_zero_idx_temp)
-        start_idx = auto_zero_idx_temp[0]
-        end_idx = auto_zero_idx_temp[-1]
-        raw_mean = float(np.mean(peak_area_array[auto_zero_idx_temp]))
-        n_pts = len(auto_zero_idx_temp)
+        idx = np.where(zero_blocks == b_id)[0]
+        n_pts = len(idx)
+        center_idx = np.median(idx)
 
-        # Flag aborted or cut-off zero block
         if n_pts < min_zero_points:
             zero_diagnostics.append({
-                'block_id': b_id,
-                'center': center_idx,
-                'start_idx': start_idx,
-                'end_idx': end_idx,
-                'mean': raw_mean,
-                'points': n_pts,
-                'status': 'skipped_too_short',
-                'reason': f"Cut off ({n_pts} pts < {min_zero_points})"
+                'block_id': b_id, 'center': center_idx, 'start_idx': idx[0], 
+                'end_idx': idx[-1], 'mean': float(np.mean(peak_area_array[idx])),
+                'points': n_pts, 'status': 'skipped_too_short',
+                'reason': f"Aborted ({n_pts} < {min_zero_points} pts)"
             })
             continue
 
-        # Trim initial transient points caused by valve switching and line flushing
-        if n_pts > (trim_transient_points + 2):
-            settled_idx = auto_zero_idx_temp[trim_transient_points:]
-        else:
-            settled_idx = auto_zero_idx_temp
-
+        # Trim inlet line flushing transients
+        settled_idx = idx[trim_transient_points:] if n_pts > (trim_transient_points + 2) else idx
         local_signal = peak_area_array[settled_idx]
-        local_med = np.median(local_signal)
-        local_mad = median_absolute_deviation(local_signal)
+        local_med = float(np.median(local_signal))
+        local_mad = float(median_absolute_deviation(local_signal))
 
-        # 4*MAD statistical acceptance bounds around local median
-        upper_lim = local_med + (4.0 * max(local_mad, 1e-4))
-        lower_lim = local_med - (4.0 * max(local_mad, 1e-4))
-
-        clean_idx = settled_idx[(local_signal >= lower_lim) & (local_signal <= upper_lim)]
-        current_block_zero = float(np.mean(peak_area_array[clean_idx]) if len(clean_idx) > 0 else np.mean(local_signal))
+        # Filter severe internal spikes (glitches)
+        upper = local_med + 4.0 * max(local_mad, 0.05)
+        lower = local_med - 4.0 * max(local_mad, 0.05)
+        clean = local_signal[(local_signal >= lower) & (local_signal <= upper)]
+        block_zero = float(np.mean(clean)) if len(clean) > 0 else local_med
 
         raw_centers.append(center_idx)
-        raw_zeros.append(current_block_zero)
+        raw_zeros.append(block_zero)
         raw_block_info[b_id] = {
-            'block_id': b_id,
-            'center': center_idx,
-            'start_idx': start_idx,
-            'end_idx': end_idx,
-            'mean': current_block_zero,
-            'points': n_pts,
-            'status': 'accepted',
-            'reason': 'Accepted'
+            'block_id': b_id, 'center': center_idx, 'start_idx': idx[0],
+            'end_idx': idx[-1], 'mean': block_zero, 'points': n_pts,
+            'status': 'accepted', 'reason': 'Accepted'
         }
 
-    # --- PASS 2: Cross-Block Outlier Filtering ---
+    # Cross-block screening (only if >= 5 cycles available)
     valid_centers, valid_zeros = [], []
-
-    if len(raw_zeros) >= 3:
-        global_zero_median = float(np.median(raw_zeros))
-        global_zero_mad = float(median_absolute_deviation(np.array(raw_zeros)))
-        tolerance = float(outlier_mad_mult * max(global_zero_mad, 0.5))
+    if len(raw_zeros) >= 5:
+        med_z = float(np.median(raw_zeros))
+        mad_z = float(median_absolute_deviation(np.array(raw_zeros)))
+        # Guard against zero-drift rejection: tolerance allows at least ±50% drift from median
+        tol = max(outlier_mad_mult * mad_z, 0.50 * abs(med_z), 1.0)
 
         for b_id, info in raw_block_info.items():
-            if abs(info['mean'] - global_zero_median) <= tolerance:
+            if abs(info['mean'] - med_z) <= tol:
                 valid_centers.append(info['center'])
                 valid_zeros.append(info['mean'])
                 zero_diagnostics.append(info)
             else:
                 info['status'] = 'skipped_outlier'
-                info['reason'] = f"Outlier ({info['mean']:.2f} vs med {global_zero_median:.2f} ± {tolerance:.2f})"
+                info['reason'] = f"Outlier ({info['mean']:.2f} vs med {med_z:.2f} ± {tol:.2f})"
                 zero_diagnostics.append(info)
-                # # Victor Note: Commented out the warning to reduce verbosity in normal operation. Can be re-enabled if needed.
-                # warnings.warn(
-                #     f"Auto-zero block {b_id} (mean={info['mean']:.2f}) rejected as a cross-block outlier."
-                # )
     else:
         valid_centers = raw_centers
         valid_zeros = raw_zeros
         zero_diagnostics.extend(raw_block_info.values())
 
-    # --- PASS 3: Baseline Construction ---
     if not valid_zeros:
-        warnings.warn("No valid auto-zero blocks found. Skipping background subtraction.")
+        warnings.warn("No valid auto-zero blocks found. Setting baseline to 0.")
         background_line = np.zeros(array_length, dtype=float)
     elif mode == "interp":
         if len(valid_zeros) == 1:
             background_line = np.full(array_length, valid_zeros[0], dtype=float)
         else:
-            sort_order = np.argsort(valid_centers)
+            order = np.argsort(valid_centers)
             background_line = np.interp(
-                np.arange(array_length), 
-                np.array(valid_centers)[sort_order], 
-                np.array(valid_zeros)[sort_order]
+                np.arange(array_length),
+                np.array(valid_centers)[order],
+                np.array(valid_zeros)[order]
             )
     elif mode == "median":
         background_line = np.full(array_length, np.median(valid_zeros), dtype=float)
 
-    # --- PASS 4: Apply Subtraction ---
     for block_id in unique_zero_blocks:
         idx = np.where(zero_blocks == block_id)[0]
         if block_id <= 0:
@@ -478,35 +454,34 @@ def _perform_background_subtraction(zero_blocks, peak_area_array, mode="interp",
 
     return full_background_subtraction, background_line, zero_diagnostics
 
+# def _cluster_sensitivity_cal_signal(data_subset):
+#     """
+#     Partition sensitivity calibration signal into low (baseline) and high (challenge) states using KMeans.
+    
+#     When calibration gas is injected into the inlet, the signal should step up. 
+#     K-Means naturally clusters the lower-intensity background points and the higher-intensity 
+#     challenge points. 
+#     Returns masks for low and high points, as well as the 'delta_step' difference between their centers.
+#     """
+#     # Guard clause: Require at least 4 points to form meaningful clusters
+#     if len(data_subset) < 4:
+#         return np.ones(len(data_subset), dtype=bool), np.zeros(len(data_subset), dtype=bool), 0.0
 
-def _cluster_sensitivity_cal_signal(data_subset):
-    """
-    Partition sensitivity calibration signal into low (baseline) and high (challenge) states using KMeans.
+#     # Reshape 1D input array to a 2D column vector (N, 1) required by Scikit-Learn KMeans API
+#     data_reshaped = np.asarray(data_subset, dtype=float).reshape(-1, 1)
     
-    When calibration gas is injected into the inlet, the signal should step up. 
-    K-Means naturally clusters the lower-intensity background points and the higher-intensity 
-    challenge points. 
-    Returns masks for low and high points, as well as the 'delta_step' difference between their centers.
-    """
-    # Guard clause: Require at least 4 points to form meaningful clusters
-    if len(data_subset) < 4:
-        return np.ones(len(data_subset), dtype=bool), np.zeros(len(data_subset), dtype=bool), 0.0
-
-    # Reshape 1D input array to a 2D column vector (N, 1) required by Scikit-Learn KMeans API
-    data_reshaped = np.asarray(data_subset, dtype=float).reshape(-1, 1)
+#     # Fit 2-cluster K-Means model to separate the two intensity states (Baseline vs. Challenge)
+#     kmeans = KMeans(n_clusters=2, n_init='auto', random_state=42).fit(data_reshaped)
+#     low_cluster_label = np.argmin(kmeans.cluster_centers_)
     
-    # Fit 2-cluster K-Means model to separate the two intensity states (Baseline vs. Challenge)
-    kmeans = KMeans(n_clusters=2, n_init='auto', random_state=42).fit(data_reshaped)
-    low_cluster_label = np.argmin(kmeans.cluster_centers_)
+#     # Generate boolean masks
+#     low_mask = (kmeans.labels_ == low_cluster_label)
+#     high_mask = ~low_mask
     
-    # Generate boolean masks
-    low_mask = (kmeans.labels_ == low_cluster_label)
-    high_mask = ~low_mask
+#     # Measure the absolute step size between the two cluster centers
+#     delta_step = float(np.max(kmeans.cluster_centers_) - np.min(kmeans.cluster_centers_))
     
-    # Measure the absolute step size between the two cluster centers
-    delta_step = float(np.max(kmeans.cluster_centers_) - np.min(kmeans.cluster_centers_))
-    
-    return low_mask, high_mask, delta_step
+#     return low_mask, high_mask, delta_step
 
 
 def _extract_event_flow(flow_param, active_indices, default_val=250.0):
@@ -535,96 +510,21 @@ def _extract_event_flow(flow_param, active_indices, default_val=250.0):
     return float(np.median(valid_global)) if len(valid_global) > 0 else float(default_val)
 
 
-def _get_cyclic_sensitivity_calibrations(sens_cal_blocks, 
-                                         background_corrected, 
-                                         cal_tank_conc=1000,
-                                         zero_flow=250,
-                                         cal_flow=5,
-                                         mode="interp",
-                                         static_sens_factor=1.0,
-                                         min_cal_points=6,
-                                         min_signal_delta=0.5,
-                                         trim_cal_transients=2):
-    """
-    Generate sensitivity calibration factors (in the form of a 1D array) from on-line 
-    sensitivity calibrations performed during data acquisition.
+def _get_cyclic_sensitivity_calibrations(
+        sens_cal_blocks,
+        background_corrected,
+        cal_tank_conc=1000.0,
+        zero_flow=250.0,
+        cal_flow=5.0,
+        mode="interp",
+        static_sens_factor=1.0,
+        min_cal_points=5,
+        min_signal_delta=0.5,
+        trim_cal_transients=5,
+    ):
+    """Generate sensitivity calibration factors from on-line challenge periods
 
-    Methodology & Guardrails:
-      1. **Two-State K-Means Partitioning**: A K-Means clustering (k=2)
-         partitions each calibration window into baseline (low signal) and challenge
-         (high signal).
-      2. **Species Response Gatekeeping (`min_signal_delta`)**: Calibration gas cylinders
-         contain only specific chemical compounds. For non-target compounds, random baseline
-         noise would otherwise be split into artificial "low" and "high" clusters. If the
-         step increase Delta_S = mean(S_high) - mean(S_low) is below
-         `min_signal_delta`, the compound is flagged as not within the tank
-         (``'skipped_no_response'``) and bypassed to avoid non-physical sensitivity values.
-      3. **Transient Trimming**: Discards the initial `trim_cal_transients`
-         points of the challenge step to account for transient/disjointed initial signals 
-         as cal/zero valves open and close. 
-      4. **Dynamic Mass Flow Dilution**: Calculates diluted concentrations dynamically for
-         each event using:
-         C_diluted = (Q_cal / (Q_zero + Q_cal)) * C_tank
-         Accepts either static flow rates or dynamic 1D telemetry monitor arrays.
-      5. **Sensitivity Factor Calculation**: Solves the response factor in concentration
-         units per signal count:
-         S_c = C_diluted / Delta_S  [ppb / (ions/s)]
-         *(Multiplying background-subtracted ions/s by S_c directly yields mixing ratio in ppb).*
-      6. **Cross-Block Outlier Filtering**: Rejects blocks with anomalous sensitivities
-         exceeding the tolerance window:
-         Tolerance = 4.0 * max(MAD(S), 0.15 * Median(S))
-
-    Parameters
-    ----------
-    sens_cal_blocks : numpy.ndarray of int
-        1D integer block ID array (from `_assign_blocks_from_chunks`). Negative integers
-        mark active calibration challenge periods; positive integers mark ambient acquisition.
-    background_corrected : numpy.ndarray of float
-        1D background-subtracted signal array (ions/s) output by `_perform_background_subtraction`.
-    cal_tank_conc : float, default=1000
-        Certified gas cylinder concentration for the target compound in parts-per-billion (ppbV).
-    zero_flow : float or array-like, default=250
-        Dilution zero air flow rate in standard cubic centimeters per minute (sccm).
-        Can be passed as a constant float or as a full 1D telemetry monitor array
-        (e.g., ``d.tps2['Zero MFC monitor [sccm]']``).
-    cal_flow : float or array-like, default=5
-        Calibration gas standard flow rate in sccm. Can be passed as a constant float or
-        as a full 1D telemetry monitor array (e.g., ``d.tps2['Cal MFC monitor [sccm]']``).
-    mode : {"interp", "median"}, default="interp"
-        Modeling mode for constructing the continuous sensitivity axis:
-        * ``"interp"``: Linearly interpolates sensitivity factors between valid calibration
-          event midpoints over time.
-        * ``"median"``: Applies the global median sensitivity factor across all spectra.
-    static_sens_factor : float, default=1.0
-        Fallback sensitivity factor applied across all points if no valid calibration
-        events are identified (or if instrument cycling was not run).
-    min_cal_points : int, default=6
-        Minimum number of sample points required to accept a calibration challenge block.
-        Aborted or interrupted calibration events are discarded.
-    min_signal_delta : float, default=0.5
-        Minimum required step height ΔS (ions/s) between the challenge and baseline segments of 
-        the sensitivity calibration.
-        Prevents calculating artificial sensitivities for compounds not present in the gas standard.
-    trim_cal_transients : int, default=2
-        Number of leading challenge points trimmed to allow mass flow controllers to settle
-        and inlet line surfaces to passivate.
-
-    Returns
-    -------
-    sensitivity_calibration_axis : numpy.ndarray of float
-        1D array matching `background_corrected` length containing the continuous time-series
-        sensitivity calibration conversion factor (ppb / (ions/s)).
-    cal_diagnostics : list of dict
-        Diagnostic inspection records for each calibration challenge block. Each dictionary contains:
-        * ``'block_id'`` (int): Identifier corresponding to the negative block ID.
-        * ``'center'`` (float): Median sample index position of the calibration block.
-        * ``'sens'`` (float): Solved sensitivity factor (ppb / (ions/s)).
-        * ``'delta_s'`` (float): Measured signal step increase ΔS (ions/s) between the challenge and baseline states.
-        * ``'high_idx'`` (numpy.ndarray): Indices used for the stable challenge state.
-        * ``'low_idx'`` (numpy.ndarray): Indices used for the stable baseline state.
-        * ``'status'`` (str): One of ``'accepted'``, ``'skipped_too_short'``,
-          ``'skipped_no_response'``, or ``'skipped_outlier'``.
-        * ``'reason'`` (str): Human-readable string summarizing the filtering outcome.
+    without K-Means clustering.
     """
     if mode not in ["interp", "median"]:
         raise ValueError("mode must be either 'interp' or 'median'")
@@ -640,51 +540,45 @@ def _get_cyclic_sensitivity_calibrations(sens_cal_blocks,
     # --- PASS 1: Calculate Block Response Factors ---
     for b_id in neg_blocks:
         auto_sens_cal_idx = np.where(sens_cal_blocks == b_id)[0]
-        center_idx = np.median(auto_sens_cal_idx)
+        n_pts = len(auto_sens_cal_idx)
+        center_idx = float(np.median(auto_sens_cal_idx))
 
-        # Aborted or cut-off calibration challenge block
-        if len(auto_sens_cal_idx) < min_cal_points:
+        if n_pts < min_cal_points:
             cal_diagnostics.append({
-                'block_id': b_id,
-                'center': center_idx,
-                'sens': np.nan,
-                'delta_s': 0.0,
-                'status': 'skipped_too_short'
+                "block_id": b_id,
+                "center": center_idx,
+                "sens": np.nan,
+                "delta_s": 0.0,
+                "status": "skipped_too_short",
+                "reason": f"Aborted ({n_pts} < {min_cal_points} pts)",
             })
             continue
 
-        block_signal = background_corrected[auto_sens_cal_idx]
-        low_mask, high_mask, delta_step = _cluster_sensitivity_cal_signal(block_signal)
+        # Trim leading flow stabilization transients
+        stable_idx = (
+            auto_sens_cal_idx[trim_cal_transients:]
+            if n_pts > (trim_cal_transients + 1)
+            else auto_sens_cal_idx
+        )
 
-        # Compound did not respond (not in calibration tank)
-        if delta_step < min_signal_delta or np.sum(high_mask) < 2:
+        # Net step above zero baseline (background_corrected is already zero-subtracted)
+        delta_s = float(np.mean(background_corrected[stable_idx]))
+
+        # Skip compounds not present in standard cylinder
+        if delta_s < min_signal_delta:
             cal_diagnostics.append({
-                'block_id': b_id,
-                'center': center_idx,
-                'sens': np.nan,
-                'delta_s': delta_step,
-                'status': 'skipped_no_response'
+                "block_id": b_id,
+                "center": center_idx,
+                "sens": np.nan,
+                "delta_s": delta_s,
+                "status": "skipped_no_response",
+                "reason": f"No step (ΔS={delta_s:.2f} < {min_signal_delta})",
             })
             continue
 
-        high_indices_local = np.where(high_mask)[0]
-        low_indices_local = np.where(low_mask)[0]
-
-        # Trim rising-edge transients
-        stable_high_idx = high_indices_local[trim_cal_transients:] if len(high_indices_local) > (trim_cal_transients + 1) else high_indices_local
-        stable_low_idx = low_indices_local
-
-        high_signal = block_signal[stable_high_idx]
-        low_signal = block_signal[stable_low_idx] if len(stable_low_idx) > 0 else [0.0]
-
-        delta_s = np.mean(high_signal) - np.mean(low_signal)
-        if delta_s <= 0:
-            continue
-
-        event_indices = auto_sens_cal_idx[stable_high_idx]
-        z_flow = _extract_event_flow(zero_flow, event_indices, default_val=250.0)
-        c_flow = _extract_event_flow(cal_flow, event_indices, default_val=5.0)
-
+        # Extract dynamic dilution flow rates
+        z_flow = _extract_event_flow(zero_flow, stable_idx, default_val=250.0)
+        c_flow = _extract_event_flow(cal_flow, stable_idx, default_val=5.0)
         total_flow = z_flow + c_flow
         if total_flow <= 0:
             continue
@@ -695,57 +589,68 @@ def _get_cyclic_sensitivity_calibrations(sens_cal_blocks,
         raw_centers.append(center_idx)
         raw_sens.append(block_sens)
         raw_block_info[b_id] = {
-            'block_id': b_id,
-            'center': center_idx,
-            'sens': block_sens,
-            'delta_s': delta_s,
-            'high_idx': auto_sens_cal_idx[stable_high_idx],
-            'low_idx': auto_sens_cal_idx[stable_low_idx],
-            'status': 'accepted'
+            "block_id": b_id,
+            "center": center_idx,
+            "sens": block_sens,
+            "delta_s": delta_s,
+            "high_idx": stable_idx,
+            "low_idx": np.array([], dtype=int),
+            "status": "accepted",
+            "reason": "Accepted",
         }
 
-    # --- PASS 2: Cross-Block Outlier Rejection ---
+    # --- PASS 2: Cross-Block Outlier Screening (>= 5 events) ---
     valid_centers, valid_sens = [], []
-
-    if len(raw_sens) >= 3:
-        sens_median = np.median(raw_sens)
-        sens_mad = median_absolute_deviation(np.array(raw_sens))
+    if len(raw_sens) >= 5:
+        sens_median = float(np.median(raw_sens))
+        sens_mad = float(median_absolute_deviation(np.array(raw_sens)))
         sens_tol = 4.0 * max(sens_mad, sens_median * 0.15)
 
         for b_id, info in raw_block_info.items():
-            if abs(info['sens'] - sens_median) <= sens_tol:
-                valid_centers.append(info['center'])
-                valid_sens.append(info['sens'])
+            if abs(info["sens"] - sens_median) <= sens_tol:
+                valid_centers.append(info["center"])
+                valid_sens.append(info["sens"])
                 cal_diagnostics.append(info)
             else:
-                info['status'] = 'skipped_outlier'
+                info["status"] = "skipped_outlier"
+                info["reason"] = (
+                    f"Outlier ({info['sens']:.4f} vs med {sens_median:.4f} ±"
+                    f" {sens_tol:.4f})"
+                )
                 cal_diagnostics.append(info)
-                # # Victor Note: Commented out the warning to reduce verbosity in normal operation. Can be re-enabled if needed.
-                # warnings.warn(
-                #     f"Cal block {b_id} (sens={info['sens']:.4f}) rejected as a cross-block outlier."
-                # )
     else:
         valid_centers = raw_centers
         valid_sens = raw_sens
         cal_diagnostics.extend(raw_block_info.values())
 
+    cal_diagnostics.sort(key=lambda d: d["center"])
+
     # --- PASS 3: Timeline Construction ---
     if not valid_sens:
-        warnings.warn(f"No valid sensitivity calibration blocks found. Falling back to static_sens_factor ({static_sens_factor}).")
-        return np.full(array_length, static_sens_factor, dtype=float), cal_diagnostics
+        warnings.warn(
+            "No valid sensitivity calibration blocks found. Falling back to"
+            f" static_sens_factor ({static_sens_factor})."
+        )
+        return np.full(
+            array_length, static_sens_factor, dtype=float
+        ), cal_diagnostics
 
     if mode == "interp":
         if len(valid_sens) == 1:
-            sensitivity_calibration_axis = np.full(array_length, valid_sens[0], dtype=float)
+            sensitivity_calibration_axis = np.full(
+                array_length, valid_sens[0], dtype=float
+            )
         else:
             sort_order = np.argsort(valid_centers)
             sensitivity_calibration_axis = np.interp(
                 np.arange(array_length),
                 np.array(valid_centers)[sort_order],
-                np.array(valid_sens)[sort_order]
+                np.array(valid_sens)[sort_order],
             )
     elif mode == "median":
-        sensitivity_calibration_axis = np.full(array_length, np.median(valid_sens), dtype=float)
+        sensitivity_calibration_axis = np.full(
+            array_length, np.median(valid_sens), dtype=float
+        )
 
     return sensitivity_calibration_axis, cal_diagnostics
 
@@ -760,7 +665,7 @@ def quantify_signal(peak_area_array, cycling_dict=None,
                     min_cal_points=6,
                     trim_zero_transients=2,
                     trim_cal_transients=2,
-                    min_signal_delta=1.0,
+                    min_signal_delta=0.5,
                     plot_flag=False,
                     output_dir=None,
                     plot_subdir="quantification_plots",
@@ -826,7 +731,7 @@ def quantify_signal(peak_area_array, cycling_dict=None,
     min_cal_points : int, default=6
         Minimum valid sample points required to accept a calibration challenge block.
     trim_zero_transients : int, default=2
-        Number of leading points to discard from each zero block to allow inlet lines to flush.
+        Number of leading points to discard from each zero block to account for transient flow artifacts
     trim_cal_transients : int, default=2
         Number of leading points to discard from the challenge step while the signal rises.
     min_signal_delta : float, default=1.0
@@ -881,14 +786,13 @@ def quantify_signal(peak_area_array, cycling_dict=None,
         working_array = np.asarray(peak_area_array, dtype=float).copy()
 
     # --- Step 2: Cycling Telemetry Inspection ---
-    # Check if instrument cycling was active during this deployment
+    # Accept either a 1D flag array (e.g., Deployment.quantification_flags) or a legacy {'type': ...} dict
+    raw_cycling_flags = cycling_dict.get('type', None) if isinstance(cycling_dict, dict) else cycling_dict
     has_valid_cycling = (
-        cycling_dict is not None and 
-        'type' in cycling_dict and 
-        # not (cycling_dict['type'] == -1).all()
-        not (cycling_dict['type'] == 0).all()
+        raw_cycling_flags is not None and
+        np.any(np.isin(raw_cycling_flags, [1, 4]))
     )
-    cycling_flags_type = cycling_dict['type'] if has_valid_cycling else np.full(len(working_array), -1)
+    cycling_flags_type = np.asarray(raw_cycling_flags) if has_valid_cycling else np.full(len(working_array), -1)
 
     # Pre-initialize baseline and diagnostic containers to guarantee clean references
     background_line = np.zeros_like(working_array, dtype=float)

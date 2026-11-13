@@ -373,7 +373,8 @@ def organize_som_data(som, input_samples, variable_names, variable_scalers, vari
     return nm_node_data, som_err_metrics
 
 def process_som_weight_peaks(nm_node_data, nm,
-                     peak_width_function, peak_type='pseudo_voigt', 
+                     peak_width_function, 
+                     peak_type='pseudo_voigt', 
                      custom_shape=None,
                      output_dir=None,
                      plot_subdir=None,

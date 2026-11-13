@@ -3,7 +3,7 @@ message: "If you use OpenTof in your work, please cite it using the metadata bel
 title: "OpenTof: A package for Time-of-Flight mass spectrometry data analysis"
 abstract: "OpenTof is a Python package for analyzing Time-of-Flight (TOF) mass spectrometry data."
 type: software
-version: "0.3.0"
+version: "0.4.0"
 url: "https://github.com/aerodyneresearch/opentof"
 repository-code: "https://github.com/aerodyneresearch/opentof"
 license: Apache-2.0

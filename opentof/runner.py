@@ -135,11 +135,11 @@ class PipelineRunner:
                 )
                 self.run_summary["step_times"]["init"] = time.time() - step_start
 
-                # Resolve base output directory (uses deployment's resolved plot_dir + default_plot_subdir)
+                # Resolve base output directory (uses deployment's resolved plot_dir + plot_subdir)
                 base_output_dir = Path(
                     self.deployment.plot_dir if getattr(self.deployment, "plot_dir", None)
                     else ot.utils.get_default_plot_dir()
-                ) / self.deployment.default_plot_subdir
+                ) / self.deployment.plot_subdir
                 base_output_dir.mkdir(parents=True, exist_ok=True)
 
                 # 2. Resolve Calibrants

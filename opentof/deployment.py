@@ -84,6 +84,8 @@ class Deployment:
         Polynomial function evaluating expected FWHM peak width as a function of m/z.
     peak_width_coeffs : numpy.ndarray or None
         Fitted polynomial coefficients for the peak width function.
+    peak_width_scatter : dict
+        Dictionary of "masses" and "fwhms" from the peak_width procedure
     tofdata_subtracted : dask.array.Array or None
         2D out-of-core Dask array containing baseline-subtracted spectral intensity values.
     peak_data : pandas.DataFrame or None
@@ -122,10 +124,12 @@ class Deployment:
         self.segment_profiles = segment_profiles
         self.reagent_ion = reagent_ion
         self.plot_dir = plot_dir
+        self._plot_subdir = None
 
         # State flags and corruption tracking masks
         self._user_entered_cycling_flag = False
         self._corrupt_flags = None  # Tracks corrupted writebuf masks across all loaded files
+        self._zero_spectra_flags = None # Tracks writebufs where tofdata is zero everywhere (generally causes problems...)
 
         # Global chronological sorting index and cached timestamp array
         self._global_sort_idx = None
@@ -155,11 +159,19 @@ class Deployment:
         self.custom_peak_shape = None
         self.peak_width_function = None
         self.peak_width_coeffs = None
+        self.peak_width_scatter = None
         self.tofdata_subtracted = None
+        self.interactive = None
 
         # Master DataFrames for extracted peak fitting results and time-series
         self.peak_data = None
         self.time_series = None
+
+        self.apd_df = None
+
+        # Container for physical telemetry-derived cycling flags used in quantification
+        self._cycling_status = None
+        self._quantification_flags = None
 
         # Block chunk size for parallel Dask matrix evaluations
         self.chunk_size = chunk_size
@@ -356,21 +368,22 @@ class Deployment:
         print("Step 2/6: Determining Instrument Type")
         obj.get_instrument_type()
 
-        # Step 3: Populate cycling status flags
-        print("Step 3/6: Populating deployment.cycling_status")
-        obj.build_cycling_status()
-
-        # Step 4: Construct out-of-core Dask TOF array
-        print("Step 4/6: Building deployment.tofdata")
+        # Step 3: Construct out-of-core Dask TOF array
+        print("Step 3/6: Building deployment.tofdata")
         obj.build_tofdata()
+        obj.check_zero_spectra()
 
-        # Step 5: Compute initial first-guess mass axis
-        print("Step 5/6: Calculating deployment.first_guess_mass_axis")
+        # Step 4: Compute initial first-guess mass axis
+        print("Step 4/6: Calculating deployment.first_guess_mass_axis")
         obj.get_first_guess()
 
-        # Step 6: Enforce global chronological timestamp order across files
-        print("Step 6/6: Enforcing global chronological order")
+        # Step 5: Enforce global chronological timestamp order across files
+        print("Step 5/6: Enforcing global chronological order")
         obj.enforce_global_time_sort()
+
+        # Step 6: Populate cycling status flags
+        print("Step 6/6: Populating deployment.cycling_status")
+        obj.build_cycling_status()
         
         # Auto-seek and import existing Tofware processing files (_IF.h5 and _p.h5) if present
         try:
@@ -420,6 +433,7 @@ class Deployment:
         obj : Deployment
             Fully initialized `Deployment` instance for the single file.
         """
+        print("Step 1/6: Loading .h5 file")
         # Parse single HDF5 file metadata and timestamps
         h5, timestamps, shape, sort_idx = cls._load_and_parse_h5(filepath, 0)
         
@@ -431,10 +445,26 @@ class Deployment:
         obj = cls({0: h5}, {0: timestamps}, {0: shape}, {0: sort_idx}, target_nbr_samples, chunk_size, segment_profiles, reagent_ion, plot_dir=plot_dir)
 
         # Run standard initialization pipeline steps
+        # Step 2: Determine single-segment or multi-segment instrument type
+        print("Step 2/6: Determining Instrument Type")
         obj.get_instrument_type()
-        obj.build_cycling_status()
+
+        # Step 3: Construct out-of-core Dask TOF array
+        print("Step 3/6: Building deployment.tofdata")
         obj.build_tofdata()
+        obj.check_zero_spectra()
+
+        # Step 4: Compute initial first-guess mass axis
+        print("Step 4/6: Calculating deployment.first_guess_mass_axis")
         obj.get_first_guess()
+
+        # Step 5: Enforce global chronological timestamp order across files
+        print("Step 5/6: Enforcing global chronological order")
+        obj.enforce_global_time_sort()
+
+        # Step 6: Populate cycling status flags
+        print("Step 6/6: Populating deployment.cycling_status")
+        obj.build_cycling_status()
 
         # Auto-seek and import matching Tofware processing files in adjacent or subfolder paths
         try:
@@ -544,25 +574,45 @@ class Deployment:
         return self._timestamps_cache
 
     @property
-    def default_plot_subdir(self):
+    def plot_subdir(self):
         """
-        Generate a default plot sub-directory prefix string based on the run start time.
+        Return the active plot sub-directory string.
 
-        Formats the earliest recorded timestamp into a ``YYYYMMDD_HHMMSS`` string label.
+        Returns the user-assigned sub-directory if set; otherwise formats the
+        earliest recorded timestamp into a ``YYYYMMDD_HHMMSS`` string label
+        (falling back to ``"OpenTof_Run"`` if timestamps are missing).
 
         Returns
         -------
         str
-            Timestamp prefix string or ``"OpenTof_Run"`` fallback if timestamps are missing.
+            Plot sub-directory name or relative path string.
         """
-        # Format the first timestamp entry into a standardized YYYYMMDD_HHMMSS string
-        if getattr(self, '_timestamps_cache', None) is not None and len(self.timestamps) > 0:
+        if getattr(self, 'plot_subdir', None) is not None:
+            return self._plot_subdir
+
+        if len(self.timestamps) > 0:
             try:
                 first_ts = pd.to_datetime(self.timestamps[0])
                 return first_ts.strftime("%Y%m%d_%H%M%S")
             except Exception:
                 pass
         return "OpenTof_Run"
+    
+    @plot_subdir.setter
+    def plot_subdir(self, value):
+        """
+        Set a custom default plot sub-directory from a ``str`` or ``pathlib.Path``.
+
+        Pass ``None`` to revert to the automatic run-timestamp sub-directory.
+        """
+        if value is None:
+            self._plot_subdir = None
+        elif isinstance(value, (str, os.PathLike)):
+            self._plot_subdir = os.fspath(value)
+        else:
+            raise TypeError(
+                f"plot_subdir must be a str, pathlib.Path, or None, got {type(value).__name__}."
+            )
 
     @property
     def shapes(self):
@@ -584,10 +634,54 @@ class Deployment:
 
         Returns
         -------
-        dict
+        dict or None
             Dictionary containing 1D arrays: ``'type'`` (cycling mode flags) and ``'step'`` (sequence steps).
         """
         return self._cycling_status
+
+    @property
+    def quantification_flags(self):
+        """
+        Return the 1D array of physical telemetry-derived cycling flags.
+
+        Values follow OpenTof cycling conventions (``0`` = ambient, ``1`` = auto-zero,
+        ``4`` = sensitivity cal, ``-1`` = transient/aborted). Falls back to
+        ``self._cycling_status['type']`` if physical telemetry was not derived.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            1D integer flag array, or ``None`` if neither source is populated.
+        """
+        if getattr(self, '_quantification_flags', None) is not None:
+            return self._quantification_flags
+        if getattr(self, '_cycling_status', None) is not None and 'type' in self._cycling_status:
+            return self._cycling_status['type']
+        return None
+
+    @quantification_flags.setter
+    def quantification_flags(self, arr):
+        """
+        Manually assign the 1D quantification flags array.
+
+        Accepts a 1D integer array (or ``None`` to clear and fall back to
+        ``cycling_status['type']``). Automatically syncs ``peak_data`` if populated.
+        """
+        if arr is None:
+            self._quantification_flags = None
+        else:
+            if isinstance(arr, dict) and 'type' in arr:
+                arr = arr['type']
+            arr = np.asarray(arr, dtype=np.int32)
+            if len(self.timestamps) > 0 and len(arr) != len(self.timestamps):
+                raise ValueError(
+                    f"Length mismatch: quantification_flags has length {len(arr)}, "
+                    f"but deployment has {len(self.timestamps)} mass spectra."
+                )
+            self._quantification_flags = arr
+
+        if getattr(self, 'peak_data', None) is not None:
+            self._sync_peak_data_metadata()
 
     @property
     def tofdata(self):
@@ -611,10 +705,9 @@ class Deployment:
         Returns
         -------
         numpy.ndarray of bool
-            1D array where ``True`` indicates valid ambient sample acquisition scans 
-            and ``False`` indicates non-standard periods (auto-zeros, cals, or corrupt scans).
+            1D array where ``True`` indicates valid ambient sample acquisition spectra
+            and ``False`` indicates non-standard periods (auto-zeros, cals, transients, or corrupt spectra).
         """
-        # Invert the non-standard acquisition mask (True = Standard Data)
         return ~self.nonstandard_acquisition_data.astype(bool)
 
     @standard_acquisition_data.setter
@@ -626,24 +719,19 @@ class Deployment:
         ----------
         arr : array-like of bool
             1D boolean array where ``True`` indicates standard acquisition spectra.
-
-        Raises
-        ------
-        ValueError
-            If `arr` length does not match total deployment spectrum count (`len(self.timestamps)`).
         """
         arr = np.asarray(arr, dtype=bool)
-        
-        # Guard clause: Validate array length against total deployment spectrum count
         if len(arr) != len(self.timestamps):
             raise ValueError(
                 f"Length mismatch: Custom array has length {len(arr)}, "
                 f"but deployment has {len(self.timestamps)} mass spectra."
             )
-            
-        # Invert the standard mask and store internally as manual non-standard flags
+
         self._manual_nonstandard_flags = ~arr
         self._user_entered_cycling_flag = True
+
+        if getattr(self, 'peak_data', None) is not None:
+            self._sync_peak_data_metadata()
 
     @property
     def tps2(self):
@@ -708,59 +796,44 @@ class Deployment:
     @property
     def nonstandard_acquisition_data(self):
         """
-        Return a boolean mask isolating non-standard acquisition scans.
+        Return a boolean mask isolating non-standard acquisition spectra.
 
-        Combines cycling status flags (auto-zeros, sensitivity calibrations), transient step 
-        padding windows, synthesized correction flags, manual user overrides, and physical 
-        writebuf truncation masks.
-
-        Returns
-        -------
-        numpy.ndarray of bool
-            1D array where ``True`` marks non-standard/bad scans (auto-zeros, cals, corrupt scans) 
-            and ``False`` marks valid ambient sampling scans.
+        Acts as a conservative ("worst-case") union across scheduled cycling
+        status (``cycling_status['type'] != 0``) and physical telemetry flags
+        (``quantification_flags != 0``) whenever populated, combined with corrupt
+        writebuf and all-zero spectrum masks.
         """
-        # Return manual user override flags immediately if active
-        if getattr(self, '_user_entered_cycling_flag', False): 
-            return self._manual_nonstandard_flags
-
-        data = self.cycling_status
-        
-        # Check if valid cycling data is present (any flag != -1)
-        has_cycling = (data['type'] != -1).any()
-
-        if has_cycling:
-            # Mark any scan where type != 0 (non-standard sampling) as True
-            flags = (data['type'] != 0)
-
-            # Apply transient padding logic for native instrument cycling steps
-            is_step_two = (data['step'] == 2)
-            if is_step_two.any():
-                # Flag startup transient period (scans before the first step 2 event)
-                first_step_two_idx = is_step_two.argmax()
-                flags[:first_step_two_idx] = True
-
-            # Handle Step 5 (Sensitivity Calibration) transients with rolling padding
-            is_step_five = (data['step'] == 5)
-            if is_step_five.any():
-                pad_before = np.roll(is_step_five, -2)
-                pad_after = np.roll(is_step_five, 2)
-                
-                # Prevent wrap-around boundary padding
-                pad_before[-1] = False 
-                pad_after[0] = False
-                
-                # Combine step 5 and adjacent transient buffer scans
-                flags = flags | is_step_five | pad_before | pad_after
-
+        if getattr(self, '_user_entered_cycling_flag', False):
+            flags = self._manual_nonstandard_flags.copy()
         else:
-            # Fallback: Assume all spectra are standard acquisition scans if cycling telemetry is missing
-            length = self.tofdata.shape[0] if self.tofdata is not None else 0
-            flags = np.zeros(length, dtype=bool)
+            n_spectra = len(self.timestamps) if len(self.timestamps) > 0 else (
+                self.tofdata.shape[0] if getattr(self, 'tofdata', None) is not None else 0
+            )
+            flags = np.zeros(n_spectra, dtype=bool)
 
-        # Combine corrupt writebuf mask into non-standard acquisition flags via bitwise OR
+            # 1. Scheduled / DAQ cycling status
+            if getattr(self, '_cycling_status', None) is not None and 'type' in self._cycling_status:
+                sched_type = np.asarray(self._cycling_status['type'])
+                if len(sched_type) == n_spectra:
+                    flags = flags | (sched_type != 0)
+
+            # 2. Physical telemetry-derived quantification flags
+            if getattr(self, '_quantification_flags', None) is not None:
+                phys_type = (
+                    np.asarray(self._quantification_flags['type'])
+                    if isinstance(self._quantification_flags, dict)
+                    else np.asarray(self._quantification_flags)
+                )
+                if len(phys_type) == n_spectra:
+                    flags = flags | (phys_type != 0)
+
+        # 3. Always include physically corrupted writebufs
         if getattr(self, '_corrupt_flags', None) is not None and len(self._corrupt_flags) == len(flags):
             flags = flags | self._corrupt_flags
+
+        # 4. Always include all-zero spectra
+        if getattr(self, '_zero_spectra_flags', None) is not None and len(self._zero_spectra_flags) == len(flags):
+            flags = flags | self._zero_spectra_flags
 
         return flags
 
@@ -773,24 +846,19 @@ class Deployment:
         ----------
         arr : array-like of bool
             1D boolean array where ``True`` indicates non-standard acquisition spectra.
-
-        Raises
-        ------
-        ValueError
-            If `arr` length does not match total deployment spectrum count (`len(self.timestamps)`).
         """
         arr = np.asarray(arr, dtype=bool)
-        
-        # Guard clause: Validate array length against total deployment spectrum count
         if len(arr) != len(self.timestamps):
             raise ValueError(
                 f"Length mismatch: Custom array has length {len(arr)}, "
                 f"but deployment has {len(self.timestamps)} mass spectra."
             )
-            
-        # Store manual non-standard flags and set user flag override marker
+
         self._manual_nonstandard_flags = arr
         self._user_entered_cycling_flag = True
+
+        if getattr(self, 'peak_data', None) is not None:
+            self._sync_peak_data_metadata()
 
     def _load_group(self, group_name):
         """
@@ -874,82 +942,258 @@ class Deployment:
             
         return self._cache[group_name]
 
-
-    def build_cycling_status(self):
+    def check_zero_spectra(self) -> np.ndarray:
         """
-        Build the combined 1D cycling status dictionary across all loaded acquisition files.
+        Identify spectra where all TOF sample channels are zero (e.g., dropped writes,
+        shutter closures, or unpopulated disk buffers).
 
-        Extracts native cycling flags (`'type'`, `'step'`, etc.) from raw files. If native 
-        cycling telemetry is absent (all ``-1`` values), synthesizes auto-zero (type ``1``) 
-        and sensitivity calibration (type ``4``) event masks directly from HDF5 
-        ``'Corrections'`` dataset tables.
+        Evaluates out-of-core across Dask chunks and stores the resulting 1D boolean
+        mask in `self._zero_spectra_flags`.
 
         Returns
         -------
-        None
-            Populates `self._cycling_status` in-place.
+        numpy.ndarray of bool
+            1D boolean array where True indicates an all-zero spectrum.
         """
+        if getattr(self, '_tofdata', None) is None:
+            self._zero_spectra_flags = np.array([], dtype=bool)
+            return self._zero_spectra_flags
+
+        # (tofdata != 0).any(axis=1) reduces each chunk along the channel axis (axis 1)
+        # in Dask; taking the inverse yields True for all-zero rows.
+        nonzero_mask = (self._tofdata != 0).any(axis=1)
+        if hasattr(nonzero_mask, 'compute'):
+            nonzero_mask = nonzero_mask.compute()
+
+        self._zero_spectra_flags = ~np.asarray(nonzero_mask, dtype=bool)
+
+        n_zeros = int(np.sum(self._zero_spectra_flags))
+        if n_zeros > 0:
+            print(f"WARNING: Identified {n_zeros} all-zero spectra. Flagged as True in Deployment.nonstandard_acquisition_data.")
+
+        return self._zero_spectra_flags
+
+    def build_cycling_status(self,
+                             prefer_physical_telemetry=True,
+                             zero_mfc_thresh=50.0,
+                             cal_mfc_thresh=1.0,
+                             min_segment_points=5,
+                             transient_buffer_points=2,
+                             mismatch_tolerance=0.10,
+                             ):
+        """
+        Build instrument cycling status tables.
+        
+        Populates:
+          - self._cycling_status: scheduled cycling table for spectral labeling.
+            Notes periods of nonambient acquisition and labels accordingly.
+          - self._quantification_flags: Physical telemetry-derived cycling states based on
+            MFC flows and valve sensors present in .h5 metadata, used in 
+            automation of the signal quantification process.
+        """
+        n_spectra = len(self.timestamps)
+        
+        # -------------------------------------------------------------
+        # 1. Extract Scheduled Cycling Table 
+        # -------------------------------------------------------------
         combined = {}
-
-        # Extract raw per-file cycling flags into self.cycling_values
         self.extract_cycling_flags()
-
-        # Flatten and collect cycling arrays across files
         for data in self.cycling_values.values():
             for key, arr in data.items():
-                arr_flat = arr.ravel()
-                combined.setdefault(key, []).append(arr_flat)
-
-        # Concatenate file-level cycling arrays
+                combined.setdefault(key, []).append(arr.ravel())
+        
         self._cycling_status = {key: np.concatenate(arrs) for key, arrs in combined.items()}
-
-        # --- FALLBACK HIERARCHY FOR SYNTHESIZING CYCLING FLAGS ---
-        # If native type array contains all -1s (missing telemetry), synthesize flags from 'Corrections' group
-        if (self._cycling_status['type'] == -1).all():
-            
-            # Check if any file handle contains a 'Corrections' HDF5 group
-            has_corrections = any('Corrections' in h5 for h5 in self._file_handles.values())
-
-            if has_corrections:
-                synth_type_list = []
+        
+        # Apply global time sort if active
+        if getattr(self, '_global_sort_idx', None) is not None:
+            for k in self._cycling_status:
+                self._cycling_status[k] = self._cycling_status[k][self._global_sort_idx]
                 
+        # Fallback to HDF5 Corrections if table is unpopulated (all -1)
+        if (self._cycling_status.get('type', np.full(n_spectra, -1)) == -1).all():
+            if any('Corrections' in h5 for h5 in self._file_handles.values()):
+                synth_type_list = []
                 for k in sorted(self._file_handles.keys()):
                     h5 = self._file_handles[k]
-                    
-                    # Extract dataset dimensions to convert (write, buf) tuples to flat 1D indices
                     d1, d2 = h5['FullSpectra/TofData'].shape[:2]
-                    num_bufs = d2
-                    total_len = d1 * d2
-                    
-                    file_synth_type = np.zeros(total_len, dtype=np.int32)
-                    
-                    # Parse background/auto-zero intervals from Corrections/Background/Data
-                    if 'Corrections' in h5 and 'Background/Data' in h5['Corrections']:
-                        bg_data = h5['Corrections/Background/Data'][:]
-                        for row in bg_data:
-                            # Map (write_start, buf_start) -> 1D start index; (write_stop, buf_stop) -> 1D stop index
-                            start_idx = int(row[1]) * num_bufs + int(row[2])
-                            end_idx = int(row[7]) * num_bufs + int(row[8])
-                            
-                            # Assign type flag 1 for auto-zero / background
-                            file_synth_type[start_idx:end_idx + 1] = 1
-                            
-                    # Parse sensitivity calibration intervals from Corrections/Calibration/Data
-                    if 'Corrections' in h5 and 'Calibration/Data' in h5['Corrections']:
-                        cal_data = h5['Corrections/Calibration/Data'][:]
-                        for row in cal_data:
-                            start_idx = int(row[1]) * num_bufs + int(row[2])
-                            end_idx = int(row[7]) * num_bufs + int(row[8])
-                            
-                            # Assign type flag 4 for sensitivity calibration
-                            file_synth_type[start_idx:end_idx + 1] = 4
-                            
-                    # Apply per-file timestamp sorting mask
-                    file_synth_type = file_synth_type[self._sort_indices[k]]
-                    synth_type_list.append(file_synth_type)
-                    
-                # Overwrite default -1 array with synthesized cycling type flags
-                self._cycling_status['type'] = np.concatenate(synth_type_list)
+                    file_type = np.zeros(d1 * d2, dtype=np.int32)
+                    if 'Corrections/Background/Data' in h5:
+                        for row in h5['Corrections/Background/Data'][:]:
+                            file_type[int(row[1])*d2 + int(row[2]) : int(row[7])*d2 + int(row[8]) + 1] = 1
+                    if 'Corrections/Calibration/Data' in h5:
+                        for row in h5['Corrections/Calibration/Data'][:]:
+                            file_type[int(row[1])*d2 + int(row[2]) : int(row[7])*d2 + int(row[8]) + 1] = 4
+                    synth_type_list.append(file_type[self._sort_indices[k]])
+                raw_corrections = np.concatenate(synth_type_list)
+                if getattr(self, '_global_sort_idx', None) is not None:
+                    raw_corrections = raw_corrections[self._global_sort_idx]
+                self._cycling_status['type'] = raw_corrections
+
+        table_status = self._cycling_status.get('type', np.full(n_spectra, -1)).copy()
+        has_table_cycling = np.any(np.isin(table_status, [1, 4]))
+
+        # Ensure scheduled table has valid 0 fallback if all entries are -1
+        if not has_table_cycling and (table_status == -1).all():
+            self._cycling_status['type'] = np.zeros(n_spectra, dtype=np.int32)
+            table_status = self._cycling_status['type']
+
+        # -------------------------------------------------------------
+        # 2. Derive Physical Truth from Valves & MFC Telemetry
+        # -------------------------------------------------------------
+        has_tps2 = hasattr(self, 'tps2') and bool(self.tps2)
+        has_valves = has_tps2 and any('valve' in k.lower() for k in self.tps2.keys())
+        has_mfc = has_tps2 and any('mfc' in k.lower() for k in self.tps2.keys())
+        can_derive_physical = prefer_physical_telemetry and (has_valves or has_mfc)
+
+        physical_status = None
+
+        if can_derive_physical:
+            try:
+                # Helper to check if array contains valid numeric data
+                def is_valid_array(arr):
+                    if arr is None or len(arr) != n_spectra:
+                        return False
+                    return not np.all(np.isnan(arr))
+
+                # --- Extract MFC flows ---
+                zero_flow, cal_flow = None, None
+                for k, v in self.tps2.items():
+                    kl = k.lower()
+                    if 'mfc' in kl:
+                        if 'zero' in kl and is_valid_array(v):
+                            # Prefer monitor over setpoint/target if available
+                            if zero_flow is None or 'mon' in kl:
+                                zero_flow = np.asarray(v, dtype=float)
+                        elif 'cal' in kl and is_valid_array(v):
+                            if cal_flow is None or 'mon' in kl:
+                                cal_flow = np.asarray(v, dtype=float)
+
+                # Clean NaNs in flows if partially present
+                if zero_flow is not None:
+                    zero_flow = np.nan_to_num(zero_flow, nan=0.0)
+                if cal_flow is not None:
+                    cal_flow = np.nan_to_num(cal_flow, nan=0.0)
+
+                # --- Extract Valve States (Guard against all-NaN arrays) ---
+                cal_valve, zero_valve = None, None
+                for k, v in self.tps2.items():
+                    kl = k.lower()
+                    if 'valve' in kl and is_valid_array(v):
+                        arr_v = np.asarray(v, dtype=float)
+                        is_open = (arr_v == 1)
+                        if 'pr1' in kl or 'cal' in kl:
+                            cal_valve = is_open if cal_valve is None else (cal_valve | is_open)
+                        elif 'pr2' in kl or 'zero' in kl:
+                            zero_valve = is_open if zero_valve is None else (zero_valve | is_open)
+
+                # Derive valve state from MFC flow when valve arrays are all-NaN or missing
+                if cal_valve is None and cal_flow is not None:
+                    cal_valve = (cal_flow > cal_mfc_thresh)
+                if zero_valve is None and zero_flow is not None:
+                    zero_valve = (zero_flow > zero_mfc_thresh)
+
+                # Flow Threshold Conditions
+                zero_flowing = (zero_flow > zero_mfc_thresh) if zero_flow is not None else True
+                cal_flowing = (cal_flow > cal_mfc_thresh) if cal_flow is not None else True
+
+                # Phase 4 (Cal Challenge): Cal valve open & cal gas flowing
+                if cal_valve is not None:
+                    is_cal = cal_valve & cal_flowing
+                elif cal_flow is not None:
+                    is_cal = cal_flowing
+                else:
+                    is_cal = np.zeros(n_spectra, dtype=bool)
+
+                # Phase 1 (Auto-Zero Air): Zero valve open & zero air flowing (Cal OFF)
+                if zero_valve is not None:
+                    is_zero = (zero_valve & zero_flowing) & np.logical_not(is_cal)
+                elif zero_flow is not None:
+                    is_zero = zero_flowing & np.logical_not(is_cal)
+                else:
+                    is_zero = np.zeros(n_spectra, dtype=bool)
+
+                # Ensure at least one physical condition was detected
+                if not np.any(is_zero) and not np.any(is_cal) and has_table_cycling:
+                    print("⚠️ Notice: Physical telemetry derived zero active events. Falling back to scheduled table.")
+                    physical_status = table_status.copy()
+                else:
+                    physical_status = np.zeros(n_spectra, dtype=np.int32)
+                    physical_status[is_zero] = 1
+                    physical_status[is_cal] = 4
+
+                    # Digital telemetry dropout smoothing (bridge 1-sample spikes)
+                    for j in range(1, n_spectra - 1):
+                        if physical_status[j] != physical_status[j - 1] and physical_status[j - 1] == physical_status[j + 1]:
+                            physical_status[j] = physical_status[j - 1]
+
+                    # Filter short transients (< min_segment_points)
+                    i = 0
+                    while i < n_spectra:
+                        start = i
+                        val = physical_status[i]
+                        while i < n_spectra and physical_status[i] == val:
+                            i += 1
+                        run_len = i - start
+                        if run_len < min_segment_points and val in (1, 4):
+                            physical_status[start:i] = -1
+
+            except Exception as e:
+                print(f"⚠️ Warning: Physical telemetry inferencing encountered an error: {e}. Falling back to scheduled table.")
+                physical_status = table_status.copy()
+        else:
+            physical_status = table_status.copy()
+
+        # Audit physical vs scheduled table if present
+        if has_table_cycling and physical_status is not None:
+            from opentof.quantification import _locate_index_chunks
+
+            self._original_cycling_status = table_status.copy()
+
+            # Index-aligned discrepancy array.
+            # Each element corresponds directly to table_status at the same index.
+            discrepancy_array = np.zeros(
+                len(table_status),
+                dtype=[
+                    ("phase", np.int8),
+                    ("agreement", np.float32),
+                    ("discrepant", np.bool_),
+                ]
+            )
+
+            for phase_id, phase_name in [(1, "Auto-Zero"), (4, "Sensitivity Cal")]:
+                prog_indices = np.where(table_status == phase_id)[0]
+
+                if len(prog_indices) == 0:
+                    continue
+
+                for chunk in _locate_index_chunks(
+                    prog_indices,
+                    gap_tol=5,
+                    min_chunk_size=1
+                ):
+                    start_i = chunk[0]
+                    end_i = chunk[-1] + 1
+
+                    agreement = np.sum(
+                        physical_status[start_i:end_i] == phase_id
+                    ) / (end_i - start_i)
+
+                    if (1.0 - agreement) > mismatch_tolerance:
+                        discrepancy_array["phase"][start_i:end_i] = phase_id
+                        discrepancy_array["agreement"][start_i:end_i] = agreement
+                        discrepancy_array["discrepant"][start_i:end_i] = True
+
+            self.cycling_reconciliation_log = discrepancy_array
+
+        # Store physical derivation directly as a 1D array in self._quantification_flags
+        self._quantification_flags = (
+            physical_status if physical_status is not None else table_status.copy()
+        )
+
+        # Keep self._cycling_status['type'] aligned with scheduled/clean DAQ table
+        self._cycling_status['type'] = table_status
+
+        return self
 
     def build_tofdata(self):
         """
@@ -1417,9 +1661,19 @@ class Deployment:
                 for key in self._cycling_status:
                     self._cycling_status[key] = self._cycling_status[key][self._global_sort_idx]
 
+            if getattr(self, '_quantification_flags', None) is not None:
+                if isinstance(self._quantification_flags, dict):
+                    for key in self._quantification_flags:
+                        self._quantification_flags[key] = self._quantification_flags[key][self._global_sort_idx]
+                else:
+                    self._quantification_flags = self._quantification_flags[self._global_sort_idx]
+
             # Re-sort the corrupted writebuf tracking mask array
             if getattr(self, '_corrupt_flags', None) is not None:
                 self._corrupt_flags = self._corrupt_flags[self._global_sort_idx]
+
+            if getattr(self, '_zero_spectra_flags', None) is not None:
+                self._zero_spectra_flags = self._zero_spectra_flags[self._global_sort_idx]
 
     # ------------------------
     # Wrapper Functions
@@ -1457,7 +1711,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         **kwargs : dict
             Additional keyword arguments passed to :func:`run_mass_calibration` or 
             auxiliary plotting routines (e.g., `precomputed_gad`).
@@ -1485,7 +1739,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix from instance property if unassigned
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
             
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -1645,7 +1899,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         plot_flag : bool, default=True
             If ``True``, renders and saves diagnostic reference spectrum and TOF drift figures.
         show_plot_flag : bool, default=True
@@ -1674,6 +1928,10 @@ class Deployment:
         if getattr(self, 'calibration', None) is None:
             raise ValueError("Mass calibration has not been run. Please call `calibrate_mass()` first.")
 
+        # Forward internal GAD cache if available
+        if self._averaged_dataset is not None:
+            self.calibration['precomputed_gad'] = self._averaged_dataset
+
         # Resolve base output directory path
         if output_dir is None:
             if getattr(self, 'plot_dir', None) is not None:
@@ -1684,7 +1942,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
             
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -1727,88 +1985,186 @@ class Deployment:
         return self
 
     
-    def determine_baseline(self, target_spectrum=None, plot_flag=True, 
-                           output_dir=None, plot_subdir=None, show_plot_flag=True, 
-                           **kwargs) -> Deployment:
+    def determine_baseline(self, target_spectrum=None, window_size=None,
+                           mode='spectrum', surface_density=30, 
+                           sample_indices=None, plot_flag=True, 
+                           output_dir=None, plot_subdir=None, 
+                           show_plot_flag=True, **kwargs) -> Deployment:
         """
-        Calculate the baseline and global noise level for a spectrum.
+        Calculate baseline continuum and background noise levels.
 
-        Evaluates baseline continuum drift and standard deviation noise levels across 
-        the target spectrum (defaulting to `self.reference['reference_spectrum']`). 
-        Populates `self.baseline` with adjusted spectrum arrays and subtracts 
-        the baseline profile from `self.tofdata` to build `self.tofdata_subtracted`.
+        Supports two distinct execution modes:
+        - ``mode='spectrum'`` (default): Computes a static 1D baseline on a single target spectrum 
+          (defaulting to `self.reference['reference_spectrum']`).
+        - ``mode='surface'``: Vectorized multi-spectrum extraction across time that constructs 
+          a time-dependent baseline surface. Computes `self.tofdata_subtracted` lazily via 
+          Dask `map_blocks` so that no full 2D surface array is held in RAM.
 
         Parameters
         ----------
         target_spectrum : numpy.ndarray or None, default=None
-            1D intensity spectrum array to analyze. Defaults to the calculated reference 
-            spectrum (`self.reference['reference_spectrum']`) if ``None``.
+            1D array evaluated when `mode='spectrum'`.
+        mode : {'spectrum', 'surface'}, default='spectrum'
+            Baseline estimation mode.
+        surface_density : int, default=30
+            Sample stride frequency (every N-th spectrum) when `mode='surface'`.
+        sample_indices : sequence of int or None, default=None
+            Explicit sample indices override when `mode='surface'`.
         plot_flag : bool, default=True
-            If ``True``, generates diagnostic baseline correction figures.
+            If ``True``, exports diagnostic baseline figures.
         output_dir : str or pathlib.Path or None, default=None
-            Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
+            Base export folder path.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Subfolder name (defaults to run timestamp folder).
         show_plot_flag : bool, default=True
-            If ``True``, displays generated diagnostic plots interactively.
+            If ``True``, renders plots interactively.
         **kwargs : dict
-            Additional keyword arguments passed to :func:`determine_baseline` 
-            (e.g., `cutoff_freq`, `window_size`).
-
-        Returns
-        -------
-        self : Deployment
-            Updated `Deployment` instance with `self.baseline` dictionary populated and 
-            `self.tofdata_subtracted` constructed containing:
-                * ``'baseline_adjusted_spectrum'`` : 1D baseline-subtracted reference spectrum array.
-                * ``'low_pass_data'`` : 1D low-pass filtered trendline array.
-                * ``'smoothed_baseline'`` : 1D Savitzky-Golay smoothed baseline array.
-                * ``'adjusted_baseline'`` : 1D final adjusted baseline profile array.
-                * ``'global_noise_level'`` : Calculated baseline noise standard deviation (σ).
-                * ``'med_diff'`` : Median residual difference.
-
-        Raises
-        ------
-        ValueError
-            If `target_spectrum` is ``None`` and `self.reference` has not been defined.
+            Passed to `determine_baseline` or `determine_baseline_surface`.
         """
-        # Safety check: Default to the reference spectrum if no target is provided
+        from opentof.utils import get_default_plot_dir
+
+        if output_dir is None:
+            output_dir = getattr(self, 'plot_dir', None) or get_default_plot_dir()
+        if plot_subdir is None:
+            plot_subdir = self.plot_subdir
+            
+        final_plot_dir = os.path.join(output_dir, plot_subdir)
+        kwargs['output_dir'] = final_plot_dir
+        kwargs['show_plot_flag'] = show_plot_flag
+
+        # =========================================================================
+        # MODE 1: BASELINE SURFACE CALCULATION 
+        # =========================================================================
+        if mode.lower() in ("surface", "fast_surface", "batch"):
+            from opentof.mass_calibration import (
+                determine_baseline_surface,
+                _subtract_baseline_surface_worker,
+                _interpolate_baseline_surface,
+                plot_baseline_surface
+            )
+
+            if getattr(self, 'tofdata', None) is None:
+                raise ValueError("Deployment.tofdata is not initialized. Cannot construct baseline surface.")
+
+            n_total = self.tofdata.shape[0]
+
+            # 1. Determine Sample Stride
+            if sample_indices is None:
+                sample_indices = np.arange(0, n_total, surface_density)
+                if sample_indices[-1] != n_total - 1:
+                    sample_indices = np.append(sample_indices, n_total - 1)
+            else:
+                sample_indices = np.asarray(sample_indices, dtype=int)
+
+            # Safeguard: Avoid sampling dropped or completely empty detector writes
+            if getattr(self, '_zero_spectra_flags', None) is not None and len(self._zero_spectra_flags) == n_total:
+                valid_mask = ~self._zero_spectra_flags[sample_indices]
+                if np.any(valid_mask):
+                    sample_indices = sample_indices[valid_mask]
+
+            print(f"Sampling {len(sample_indices)} spectra (every {surface_density} spectra) for vectorized baseline surface...")
+
+            # 2. Pull subsampled batch into RAM once for vectorized processing
+            temp_tofdata = self.tofdata[sample_indices, :]
+            if hasattr(temp_tofdata, 'compute'):
+                temp_tofdata = temp_tofdata.compute()
+
+            # 3. Vectorized baseline estimation
+            fast_kwargs = {
+                k: v for k, v in kwargs.items() 
+                if k in ('cutoff_freq', 'fs', 'order', 'window_size', 'smoothing_window', 
+                         'noise_percentile', 'noise_scaling')
+            }
+            adjusted_baselines, noise_levels = determine_baseline_surface(temp_tofdata, **fast_kwargs)
+
+            # 4. Out-of-Core Subtraction via Dask map_blocks
+            if hasattr(self.tofdata, 'map_blocks'):
+                self.tofdata_subtracted = self.tofdata.map_blocks(
+                    _subtract_baseline_surface_worker,
+                    sample_indices=sample_indices,
+                    sampled_baselines=adjusted_baselines,
+                    dtype=self.tofdata.dtype
+                )
+            else:
+                # Fallback for dense in-memory arrays (evaluated in blocks to avoid doubling RAM)
+                self.tofdata_subtracted = np.empty_like(self.tofdata)
+                step = 1000
+                for s_i in range(0, n_total, step):
+                    e_i = min(s_i + step, n_total)
+                    bl_chunk = _interpolate_baseline_surface(np.arange(s_i, e_i), sample_indices, adjusted_baselines)
+                    self.tofdata_subtracted[s_i:e_i] = self.tofdata[s_i:e_i] - bl_chunk
+
+            # 5. Populate self.baseline with both surface metadata and 1D fallbacks for legacy tools
+            rep_baseline = np.median(adjusted_baselines, axis=0)
+            rep_noise = float(np.median(noise_levels))
+
+            ref_spec_adj = None
+            if getattr(self, 'reference', None) is not None and 'reference_spectrum' in self.reference:
+                ref_spec_adj = self.reference['reference_spectrum'] - rep_baseline
+            elif target_spectrum is not None:
+                ref_spec_adj = target_spectrum - rep_baseline
+
+            self.baseline = {
+                'mode': 'surface',
+                'surface_density': surface_density,
+                'sampled_indices': sample_indices,
+                'sampled_baselines': adjusted_baselines,
+                'noise_levels': noise_levels,
+                'adjusted_baseline': rep_baseline,               # 1D fallback for downstream methods
+                'global_noise_level': rep_noise,                  # Scalar noise floor
+                'baseline_adjusted_spectrum': ref_spec_adj,       # For peak width & shape extractors
+                'med_diff': None,
+            }
+
+            # 6. Render Surface Diagnostic Plot
+            if plot_flag:
+                m_axis = self.first_guess_mass_axis
+                if getattr(self, 'reference', None) is not None and 'rs_mass_axis' in self.reference:
+                    m_axis = self.reference['rs_mass_axis']
+
+                sampled_ts = None
+                if getattr(self, 'timestamps', None) is not None and len(self.timestamps) == n_total:
+                    sampled_ts = self.timestamps[sample_indices]
+
+                plot_baseline_surface(
+                    mass_axis=m_axis,
+                    adjusted_baselines=adjusted_baselines,
+                    timestamps=sampled_ts,
+                    sample_indices=sample_indices,
+                    output_dir=final_plot_dir,
+                    plot_filename=kwargs.get('plot_filename', 'baseline_surface.png'),
+                    show_plot_flag=show_plot_flag,
+                    plt_log_flag=kwargs.get('plt_log_flag', True),
+                    plt_y_min=kwargs.get('plt_y_min', None),
+                    plt_y_max=kwargs.get('plt_y_max', None),
+                    xlim=kwargs.get('xlim', None),
+                    cmap=kwargs.get('cmap', 'Spectral'),
+                )
+
+            print("✅ Dynamic baseline surface subtraction complete. Baseline subtracted array stored lazily within `Deployment.tofdata_subtracted`.")
+            return self
+
+        # =========================================================================
+        # MODE 2: CLASSIC SINGLE-SPECTRUM BASELINE
+        # =========================================================================
         if target_spectrum is None:
             if getattr(self, 'reference', None) is None:
                 raise ValueError(
-                    "No reference spectrum found. Please call `define_reference_spectrum()` first, "
-                    "or explicitly provide a `target_spectrum` array."
+                    "No reference spectrum found. Call `determine_reference_spectrum()` first, "
+                    "or pass `target_spectrum` / `mode='surface'`."
                 )
             target_spectrum = self.reference['reference_spectrum']
 
-        if output_dir is None:
-            if getattr(self, 'plot_dir', None) is not None:
-                output_dir = self.plot_dir
-            else:
-                from opentof.utils import get_default_plot_dir
-                output_dir = get_default_plot_dir()
-            
-        if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
-            
-        output_dir = os.path.join(output_dir, plot_subdir)
-        kwargs['output_dir'] = output_dir
-        kwargs['show_plot_flag'] = show_plot_flag
+        from opentof.mass_calibration import determine_baseline as backend_determine_baseline
 
-        # Import inside the method to prevent circular import issues
-        from opentof.mass_calibration import determine_baseline as determine_baseline
-        
-        # Run the external function
-        # All extra parameters (cutoff_freq, window_size, etc.) can be passed via **kwargs
-        results = determine_baseline(
+        results = backend_determine_baseline(
             intensity_spectrum=target_spectrum,
             plot_flag=plot_flag,
             **kwargs
         )
-        
-        # determine_baseline returns a tuple of 6 items:
-        # (baseline_adjusted_spectrum, low_pass_data, smoothed_baseline, adjusted_baseline, noise_level, med_diff)
+
         self.baseline = {
+            'mode': 'spectrum',
             'baseline_adjusted_spectrum': results[0],
             'low_pass_data': results[1],
             'smoothed_baseline': results[2],
@@ -1818,7 +2174,6 @@ class Deployment:
         }
 
         self.tofdata_subtracted = self.tofdata - self.baseline['adjusted_baseline'].reshape(1, -1)
-
         return self
 
     
@@ -1845,7 +2200,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         show_plot_flag : bool, default=True
             If ``True``, displays generated diagnostic plots interactively.
         **kwargs : dict
@@ -1880,7 +2235,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -1893,7 +2248,7 @@ class Deployment:
         # Execute selected peak width parameterization algorithm
         if mode == 'ransac':
             print("Determining peak width using RANSAC regression...")
-            fit_coeffs, offset_coeffs, rp_popt = ransac_peak_width(
+            fit_coeffs, offset_coeffs, rp_popt, filtered_peak_data = ransac_peak_width(
                 reference_spectrum=self.baseline['baseline_adjusted_spectrum'],
                 rs_mass_axis=self.reference['rs_mass_axis'],
                 plot_flag=plot_flag,
@@ -1901,7 +2256,7 @@ class Deployment:
             )
         else:
             print("Determining peak width using iterative refinement...")
-            fit_coeffs, rp_popt = peak_width(
+            fit_coeffs, rp_popt, filtered_peak_data = peak_width(
                 reference_spectrum=self.baseline['baseline_adjusted_spectrum'],
                 rs_mass_axis=self.reference['rs_mass_axis'],
                 plot_flag=plot_flag,
@@ -1923,6 +2278,13 @@ class Deployment:
 
         # Construct mass-dependent resolving power callable function RP(m) = a * m^b
         self.resolving_power_function = lambda m: rp_popt[0] * (m ** rp_popt[1])
+
+        pw_scatter_points = {
+            "masses": filtered_peak_data[:, 0],
+            "fwhms": filtered_peak_data[:, 1]
+        }
+
+        self.peak_width_scatter = pw_scatter_points
         
         # Return self instance to enable method chaining
         return self
@@ -1945,7 +2307,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         show_plot_flag : bool, default=True
             If ``True``, displays generated diagnostic plots interactively.
         **kwargs : dict
@@ -1978,7 +2340,7 @@ class Deployment:
             
         # Resolve plot sub-directory prefix
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         # Combine base output directory with sub-directory prefix
         output_dir = os.path.join(output_dir, plot_subdir)
@@ -2107,6 +2469,64 @@ class Deployment:
                     
         return df
 
+    def _sync_peak_data_metadata(self, df=None):
+        """
+        Attach or refresh deployment-level timestamps, acquisition mask, cycling
+        status, and quantification flags on a ``peak_data`` DataFrame.
+        """
+        target_df = self.peak_data if df is None else df
+        if target_df is None:
+            return None
+
+        n_rows = len(target_df)
+        n_total = len(self.timestamps)
+
+        # Resolve index alignment via MS_index if present, otherwise positional alignment
+        if "MS_index" in target_df.columns and n_total > 0:
+            ms_idx = target_df["MS_index"].to_numpy(dtype=int)
+            valid_bounds = (ms_idx >= 0) & (ms_idx < n_total)
+            use_ms_idx = bool(np.all(valid_bounds))
+        else:
+            ms_idx = None
+            use_ms_idx = False
+
+        meta_cols = {}
+
+        if n_total > 0 and (use_ms_idx or n_total == n_rows):
+            meta_cols["timestamp"] = self.timestamps[ms_idx] if use_ms_idx else self.timestamps
+
+        std_mask = self.standard_acquisition_data
+        if len(std_mask) > 0 and (use_ms_idx or len(std_mask) == n_rows):
+            meta_cols["standard_acquisition_data"] = std_mask[ms_idx] if use_ms_idx else std_mask
+
+        if getattr(self, "_cycling_status", None) is not None and "type" in self._cycling_status:
+            cyc_arr = np.asarray(self._cycling_status["type"])
+            if len(cyc_arr) > 0 and (use_ms_idx or len(cyc_arr) == n_rows):
+                meta_cols["cycling_status"] = cyc_arr[ms_idx] if use_ms_idx else cyc_arr
+
+        q_flags = self.quantification_flags
+        if q_flags is not None:
+            q_arr = np.asarray(q_flags)
+            if len(q_arr) > 0 and (use_ms_idx or len(q_arr) == n_rows):
+                meta_cols["quantification_flags"] = q_arr[ms_idx] if use_ms_idx else q_arr
+
+        if not meta_cols:
+            return target_df
+
+        # Drop any stale versions of metadata columns before re-inserting cleanly after MS_index
+        existing_meta = [c for c in meta_cols if c in target_df.columns]
+        if existing_meta:
+            target_df = target_df.drop(columns=existing_meta)
+
+        insert_pos = (target_df.columns.get_loc("MS_index") + 1) if "MS_index" in target_df.columns else 0
+        for offset, (col_name, col_vals) in enumerate(meta_cols.items()):
+            target_df.insert(insert_pos + offset, col_name, col_vals)
+
+        if df is None:
+            self.peak_data = target_df
+
+        return target_df
+
     # TODO: progress bar is nonlinear!!
     def FFI_unconstrained(self, peak_type='gaussian', 
                           noise_level=None, 
@@ -2207,11 +2627,8 @@ class Deployment:
 
         # Scale monoisotopic peak areas to account for total molecular isotopic abundance
         result_df = self._apply_isotope_reallocation(result_df)
-        
-        # Store result DataFrame on instance
-        self.peak_data = result_df
 
-        # Return self instance to enable method chaining
+        self.peak_data = self._sync_peak_data_metadata(result_df)
         return self
     
     # TODO: progress bar is nonlinear!!
@@ -2290,10 +2707,7 @@ class Deployment:
         # Scale monoisotopic peak areas to account for total molecular isotopic abundance
         result_df = self._apply_isotope_reallocation(result_df)
 
-        # Store result DataFrame on instance
-        self.peak_data = result_df
-
-        # Return self instance to enable method chaining
+        self.peak_data = self._sync_peak_data_metadata(result_df)
         return self
 
     def integrate_UMR(self, nm_list=None, nm_search_range=0.5, 
@@ -2354,21 +2768,20 @@ class Deployment:
             verbose=verbose
         )
 
+        # In integrate_UMR:
         if merge_to_peak_data:
             if self.peak_data is None:
-                self.peak_data = umr_df
+                self.peak_data = self._sync_peak_data_metadata(umr_df)
             else:
-                # Merge left on MS_index to keep all existing high-res peak_data rows intact
-                self.peak_data = pd.merge(self.peak_data, umr_df, on="MS_index", how="left")
-
-        return self
+                merged_df = pd.merge(self.peak_data, umr_df, on="MS_index", how="left")
+                self.peak_data = self._sync_peak_data_metadata(merged_df)
     
     def generate_averaged_dataset(self, averaging_interval=300, 
                                   recalculate=False, **kwargs) -> Deployment:
         """
         Generate and cache the Global Averaged Dataset (GAD) across time intervals.
 
-        Averages TOF spectral intensity matrices across standard acquisition scans inside 
+        Averages TOF spectral intensity matrices across standard acquisition spectra inside 
         fixed time windows (`averaging_interval` seconds). Uses cached results if the requested 
         interval matches `self._averaged_dataset_interval` unless `recalculate=True`.
 
@@ -2463,7 +2876,7 @@ class Deployment:
             * ``'center'``: Fitted peak center mass (m/z).
             * ``'fwhm'``: Fitted FWHM width in mass units.
         use_std_acq_data : bool, default=True
-            If ``True``, filters out non-standard acquisition scans (auto-zeros, cals, corrupt scans) 
+            If ``True``, filters out non-standard acquisition spectra (auto-zeros, cals, corrupt spectra) 
             using `self.standard_acquisition_data`.
         color : str, default="deepskyblue"
             Matplotlib line color string.
@@ -3186,218 +3599,9 @@ class Deployment:
         self.diagnostic_fits[f"unconstrained_{nominal_mass}"] = result
         return result
 
-    def synthesize_cycling_status(self, 
-                                  overwrite=False,
-                                  min_ambient_points=30,
-                                  zero_mfc_thresh=50.0, 
-                                  cal_mfc_thresh=1.0, 
-                                  plot_flag=True, 
-                                  output_dir=None, 
-                                  plot_filename="deployment_cycling.png"):
-        """
-        Reconstruct d.cycling_status['type'] and d.standard_acquisition_data using
-        MFC flow monitors and valve target telemetry from TPS2.
 
-        Includes run-length filtering to eliminate transient 'ambient' blips (1-point
-        dropouts or valve-switching chatter) by absorbing them into the surrounding
-        non-standard cycling phases.
-
-        Parameters
-        ----------
-        overwrite : bool, default=False
-            If False and the deployment already has valid cycling flags (type 1 or 4),
-            synthesis is skipped to protect ground truth data.
-        min_ambient_points : int, default=30
-            Minimum number of consecutive spectra required to qualify as legitimate
-            ambient acquisition data. Any run of status == 0 shorter than this threshold
-            is disallowed and absorbed into the adjacent cycling events.
-        zero_mfc_thresh : float, default=50.0
-            Minimum flow (sccm) on the Zero MFC to classify as active zero air overflow.
-        cal_mfc_thresh : float, default=1.0
-            Minimum flow (sccm) on the Cal MFC to classify as active calibration challenge.
-        plot_flag : bool, default=True
-            If True, saves a 2-panel verification plot of the cycle status and flows.
-        output_dir : str or None, default=None
-            Target directory for the plot. Defaults to OpenTof default plot dir.
-        plot_filename : str, default="deployment_cycling.png"
-            Filename for the exported diagnostic plot.
-
-        Returns
-        -------
-        self : Deployment
-            The Deployment instance.
-        """
-        # --- 1. Ground Truth Protection Guardrail ---
-        current_type = getattr(self, 'cycling_status', {}).get('type', None)
-        has_existing_cycling = (
-            current_type is not None and 
-            np.any(np.isin(current_type, [1, 4]))
-        )
-
-        if has_existing_cycling and not overwrite:
-            n_zeros = np.sum(current_type == 1)
-            n_cals = np.sum(current_type == 4)
-            print(
-                f"ℹ️ Valid cycling table already present ({n_zeros} zero points, {n_cals} cal points). "
-                f"Skipping synthesis. Pass `overwrite=True` if you wish to re-derive from flows/valves."
-            )
-            return self
-
-        # --- 2. Telemetry Availability Guard ---
-        if not hasattr(self, 'tps2') or not self.tps2:
-            warnings.warn("No TPS2 telemetry found in deployment. Cannot synthesize cycling status.")
-            return self
-
-        n_spectra = len(self.timestamps)
-        status = np.zeros(n_spectra, dtype=np.int32)
-
-        # --- 3. Extract Mass Flow Controller Monitors from TPS2 ---
-        zero_flow = None
-        cal_flow = None
-        for k in self.tps2.keys():
-            k_low = k.lower()
-            if 'mfc' in k_low:
-                if 'zero' in k_low and zero_flow is None:
-                    zero_flow = np.asarray(self.tps2[k], dtype=float)
-                elif 'cal' in k_low and cal_flow is None:
-                    cal_flow = np.asarray(self.tps2[k], dtype=float)
-
-        # --- 4. Extract Valve Target State Commands ---
-        cal_valve = None
-        zero_valve = None
-        for k in self.tps2.keys():
-            k_low = k.lower()
-            if 'valve' in k_low:
-                if 'pr1' in k_low or 'cal' in k_low:
-                    cal_valve = (np.asarray(self.tps2[k]) == 1)
-                elif 'pr2' in k_low or 'zero' in k_low:
-                    zero_valve = (np.asarray(self.tps2[k]) == 1)
-
-        # --- 5. Establish Physical Active Flow Conditions ---
-        zero_flowing = (zero_flow > zero_mfc_thresh) if (zero_flow is not None and len(zero_flow) == n_spectra) else True
-        cal_flowing = (cal_flow > cal_mfc_thresh) if (cal_flow is not None and len(cal_flow) == n_spectra) else True
-
-        # Phase 4 (Sensitivity Cal Challenge): Cal gas flowing & cal valve open
-        if cal_valve is not None:
-            is_cal = cal_valve & cal_flowing
-        elif cal_flow is not None:
-            is_cal = cal_flow > cal_mfc_thresh
-        else:
-            is_cal = np.zeros(n_spectra, dtype=bool)
-
-        # Phase 1 (Auto-Zero Air): Zero air flowing & zero valve open, with Cal gas OFF
-        if zero_valve is not None:
-            is_zero = (zero_valve & zero_flowing) & ~is_cal
-        elif zero_flow is not None:
-            is_zero = (zero_flow > zero_mfc_thresh) & ~is_cal
-        else:
-            is_zero = np.zeros(n_spectra, dtype=bool)
-
-        status[is_zero] = 1
-        status[is_cal] = 4
-
-        # --- 6. RUN-LENGTH FILTER: ABSORB SHORT TRANSIENT AMBIENT RUNS ---
-        # Any stretch of status == 0 shorter than min_ambient_points is an artifact
-        if min_ambient_points > 1:
-            i = 0
-            absorbed_blips = 0
-            while i < n_spectra:
-                if status[i] == 0:
-                    start = i
-                    while i < n_spectra and status[i] == 0:
-                        i += 1
-                    end = i
-                    run_len = end - start
-
-                    # If the ambient period is too short, bridge it into the surrounding cycle
-                    if run_len < min_ambient_points:
-                        absorbed_blips += 1
-                        prev_val = status[start - 1] if start > 0 else None
-                        next_val = status[end] if end < n_spectra else None
-
-                        if prev_val is not None and next_val is not None:
-                            if prev_val == next_val:
-                                # Bridge across single-point dips during zero air or cal
-                                status[start:end] = prev_val
-                            else:
-                                # Transition between Zero and Cal: split at midpoint
-                                mid = start + (run_len // 2)
-                                status[start:mid] = prev_val
-                                status[mid:end] = next_val
-                        elif prev_val is not None:
-                            # Transient blip at the very end of deployment
-                            status[start:end] = prev_val
-                        elif next_val is not None:
-                            # Startup chatter at the beginning of deployment
-                            status[start:end] = next_val
-                else:
-                    i += 1
-
-            # # Debug
-            # if absorbed_blips > 0:
-                # print(f"Cleaned up {absorbed_blips} transient ambient blip(s) (< {min_ambient_points} points).")
-
-        # --- 7. Backup & State Assignment ---
-        if getattr(self, '_cycling_status', None) is None:
-            self._cycling_status = {}
-        elif 'type' in self._cycling_status and getattr(self, '_original_cycling_status', None) is None:
-            self._original_cycling_status = self._cycling_status['type'].copy()
-
-        self._cycling_status['type'] = status
-        
-        # Ambient acquisition should now have no runs shorter than min_ambient_points
-        self.standard_acquisition_data = (status == 0)
-
-        n_zero_pts = np.sum(status == 1)
-        n_cal_pts = np.sum(status == 4)
-        n_amb_pts = np.sum(status == 0)
-        print(f"Cycling status synthesis found: {n_zero_pts} zero points, {n_cal_pts} cal points, {n_amb_pts} ambient points.")
-
-        # --- 8. Diagnostic Verification Plot ---
-        if plot_flag:
-            from opentof.utils import get_default_plot_dir, ensure_dir
-            if output_dir is None:
-                base_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
-                output_dir = os.path.join(base_dir, self.default_plot_subdir)
-            ensure_dir(output_dir)
-
-            fig, (ax1, ax2) = plt.subplots(
-                2, 1, 
-                figsize=(12, 6), 
-                sharex=True, 
-                dpi=150, 
-                gridspec_kw={'height_ratios': [1, 2]}
-            )
-
-            # Subplot 1: Cleaned Phase Timeline
-            ax1.plot(self.timestamps, status, color='indigo', lw=1.2)
-            ax1.set_ylabel("Cycle Phase", fontweight='bold')
-            ax1.set_yticks([0, 1, 4])
-            ax1.set_yticklabels(["0 (Ambient)", "1 (Zero)", "4 (Cal)"])
-            ax1.grid(True, alpha=0.3, linestyle="--")
-            ax1.set_title(f"Synthesized Cycling Status")
-
-            # Subplot 2: Physical Flows Supporting the Assignment
-            if zero_flow is not None:
-                ax2.plot(self.timestamps, zero_flow, color='blue', alpha=0.7, label='Zero MFC [sccm]')
-            if cal_flow is not None:
-                ax2_twin = ax2.twinx()
-                ax2_twin.plot(self.timestamps, cal_flow, color='crimson', alpha=0.8, label='Cal MFC [sccm]')
-                ax2_twin.set_ylabel("Cal MFC (sccm)", color='crimson', fontweight='bold')
-                ax2_twin.tick_params(axis='y', labelcolor='crimson')
-
-            ax2.set_ylabel("Zero MFC (sccm)", color='blue', fontweight='bold')
-            ax2.tick_params(axis='y', labelcolor='blue')
-            ax2.set_xlabel("Time (UTC)")
-            ax2.grid(True, alpha=0.3, linestyle="--")
-
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, plot_filename), bbox_inches='tight')
-            plt.close()
-
-        return self
-
-    def quantify_signal(self, peak_target,
+    def quantify_signal(self, 
+                        peak_target,
                         cal_tank_conc=1000.0,
                         zero_flow=None,
                         cal_flow=None,
@@ -3411,6 +3615,8 @@ class Deployment:
                         min_zero_points=5,
                         min_cal_points=5,
                         min_signal_delta=0.5,
+                        trim_zero_transients=2,
+                        trim_cal_transients=2,
                         plot_flag=False,
                         output_dir=None,
                         plot_subdir="quantification_plots",
@@ -3421,7 +3627,7 @@ class Deployment:
         This wrapper automates the retrieval of inputs required for the quantification backend.
         It automatically extracts flow arrays from the Mass Flow Controllers (MFCs) in `self.tps2`, 
         locates the integrated area of the target peak from `self.peak_data`, and feeds the 
-        instrument's cycling telemetry (`self.cycling_status`) into the processor.
+        instrument's cycling telemetry (`self._cycling_status`) into the processor.
 
         Parameters
         ----------
@@ -3489,22 +3695,42 @@ class Deployment:
             signal_array = np.asarray(peak_target, dtype=float)
 
         # --- 2. Auto-Detect Flows from TPS2 Telemetry ---
-        # Find Mass Flow Controller (MFC) variables in the telemetry cache via substring matching
+        # 2. Auto-Detect Flows from TPS2 (Prefer monitors over setpoints)
+        if zero_flow is None and hasattr(self, "tps2") and self.tps2:
+            mon_keys = [
+                k
+                for k in self.tps2.keys()
+                if "zero" in k.lower() and "mfc" in k.lower() and "mon" in k.lower()
+            ]
+            all_keys = [
+                k
+                for k in self.tps2.keys()
+                if "zero" in k.lower() and "mfc" in k.lower()
+            ]
+            if mon_keys:
+                zero_flow = self.tps2[mon_keys[0]]
+            elif all_keys:
+                zero_flow = self.tps2[all_keys[0]]
         if zero_flow is None:
-            if hasattr(self, 'tps2') and self.tps2:
-                matched_zero = [k for k in self.tps2.keys() if 'zero' in k.lower() and 'mfc' in k.lower()]
-                if matched_zero:
-                    zero_flow = self.tps2[matched_zero[0]]
-            if zero_flow is None:
-                zero_flow = 250.0  # Fallback default
+            zero_flow = 250.0
 
+        if cal_flow is None and hasattr(self, "tps2") and self.tps2:
+            mon_keys = [
+                k
+                for k in self.tps2.keys()
+                if "cal" in k.lower() and "mfc" in k.lower() and "mon" in k.lower()
+            ]
+            all_keys = [
+                k
+                for k in self.tps2.keys()
+                if "cal" in k.lower() and "mfc" in k.lower()
+            ]
+            if mon_keys:
+                cal_flow = self.tps2[mon_keys[0]]
+            elif all_keys:
+                cal_flow = self.tps2[all_keys[0]]
         if cal_flow is None:
-            if hasattr(self, 'tps2') and self.tps2:
-                matched_cal = [k for k in self.tps2.keys() if 'cal' in k.lower() and 'mfc' in k.lower()]
-                if matched_cal:
-                    cal_flow = self.tps2[matched_cal[0]]
-            if cal_flow is None:
-                cal_flow = 5.0  # Fallback default
+            cal_flow = 5.0
 
         # --- 3. Resolve Normalization Reference ---
         # Allow passing the formula string of the primary reagent ion (e.g., "I-")
@@ -3525,12 +3751,12 @@ class Deployment:
         if output_dir is None:
             output_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         # --- 5. Call Backend Code ---
         ppb_bc, sens_axis, bg_corr, working_arr = backend_quantify(
             peak_area_array=signal_array,
-            cycling_dict=getattr(self, 'cycling_status', None),
+            cycling_dict=self.quantification_flags,
             cycling_zeros=cycling_zeros,
             cycling_sens_cals=cycling_sens_cals,
             normalization=normalization,
@@ -3544,6 +3770,8 @@ class Deployment:
             min_zero_points=min_zero_points,
             min_cal_points=min_cal_points,
             min_signal_delta=min_signal_delta,
+            trim_zero_transients=trim_zero_transients,
+            trim_cal_transients=trim_cal_transients,
             plot_flag=plot_flag,
             output_dir=output_dir,
             plot_subdir=plot_subdir,
@@ -3663,7 +3891,7 @@ class Deployment:
         output_dir : str or pathlib.Path or None, default=None
             Export directory path for saved plots. Defaults to `self.plot_dir` or OpenTof default if ``None``.
         plot_subdir : str or None, default=None
-            Sub-directory folder name for plots. Defaults to `self.default_plot_subdir`.
+            Sub-directory folder name for plots. Defaults to `self.plot_subdir`.
         n_jobs : int, default=1
             Number of parallel execution worker processes.
         **kwargs : dict
@@ -3700,7 +3928,7 @@ class Deployment:
             output_dir = getattr(self, 'plot_dir', None) or get_default_plot_dir()
             
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
             
         output_dir = os.path.join(output_dir, plot_subdir)
         if save_plot_flag and not os.path.exists(output_dir):
@@ -4259,7 +4487,8 @@ class Deployment:
     def nominal_mass_som(self, nm, 
                          som_size=None,
                          output_dir=None, 
-                         plot_subdir=None, 
+                         plot_subdir=None,
+                         plot_flag=True, 
                          **kwargs):
         from opentof.som_helpers import (
             RowMinMaxScaler, build_nm_som, organize_som_data,
@@ -4274,7 +4503,7 @@ class Deployment:
                 output_dir = get_default_plot_dir()
             
         if plot_subdir is None:
-            plot_subdir = self.default_plot_subdir
+            plot_subdir = self.plot_subdir
 
         self.populate_nm_data_for(nm)
 
@@ -4326,13 +4555,250 @@ class Deployment:
         if getattr(self, 'custom_peak_shape', None) is not None:
             process_som_weight_peaks(nm_node_data, nm, self.peak_width_function, 
                                     peak_type='custom', custom_shape=self.custom_peak_shape,
-                                    output_dir=output_dir, plot_subdir=plot_subdir)
+                                    output_dir=output_dir, plot_subdir=plot_subdir,
+                                    plot_flag=plot_flag)
         else:
             process_som_weight_peaks(nm_node_data, nm, self.peak_width_function,
-                                     output_dir=output_dir, plot_subdir=plot_subdir)
+                                     output_dir=output_dir, plot_subdir=plot_subdir,
+                                     plot_flag=plot_flag)
         
         return nm_node_data, som_err_metrics, som
 
+
+    def populate_nm_soms_quantized(
+        self,
+        nm_list=None,
+        som_size=(5, 5),
+        skip_flat_channels=True,
+        noise_mult=5.0,
+        store_dense_recon=False,
+        verbose=False,
+    ):
+        from opentof.som_helpers import RowMinMaxScaler, build_nm_som
+        from opentof.utils import get_raw_nm_data
+        """
+        Train SOMs across nominal masses in a memory-safe stream, storing only the
+        compact quantized codebook representation on the Deployment object.
+        """
+        if getattr(self, "calibration", None) is None:
+            raise ValueError("Mass calibration not run. Call `calibrate_mass()` first.")
+
+        # Select baseline-subtracted data if available
+        data_source = (
+            self.tofdata_subtracted
+            if getattr(self, "tofdata_subtracted", None) is not None
+            else self.tofdata
+        )
+        mass_axis = (
+            self.reference["rs_mass_axis"]
+            if getattr(self, "reference", None) is not None
+            else self.first_guess_mass_axis
+        )
+
+        # Resolve nominal mass targets
+        if nm_list is None:
+            nm_list = np.unique(np.round(mass_axis)).astype(int)
+            # nm_list = nm_list[(nm_list >= 15) & (nm_list <= 400)]
+
+        global_noise = 0.0
+        if getattr(self, "baseline", None) and "global_noise_level" in self.baseline:
+            global_noise = float(self.baseline["global_noise_level"])
+
+        # Initialize experimental container attributes
+        if not hasattr(self, "nm_soms"):
+            self.nm_soms = {}
+        if not hasattr(self, "nm_som_quantized"):
+            self.nm_som_quantized = {}
+
+        n_spectra = len(data_source)
+        print(f"Streaming SOM quantization across {len(nm_list)} nominal masses...")
+
+        for nm in tqdm(nm_list, desc="Quantizing NM SOMs"):
+            # 1. Memory-safe extraction of single nominal mass window across all spectra
+            int_seg, neg2d_seg, ma_seg, _ = get_raw_nm_data(
+                nm=nm,
+                tofdata=data_source,
+                tof_axis=self.tof_axis,
+                calibration_results=self.calibration,
+                mode="pad",
+                chunk_size=self.chunk_size,
+            )
+
+            L = int_seg.shape[1]
+            if L < 4:
+                continue
+
+            # Fast gatekeeper: skip completely flat / dead baseline windows
+            if (
+                skip_flat_channels
+                and global_noise > 0
+                and np.max(int_seg) <= (global_noise * noise_mult)
+            ):
+                continue
+
+            # 2. Row-wise scaling of intensity, neg2d, and mass coordinates
+            scaler_int = RowMinMaxScaler()
+            int_scaled, int_scalers = scaler_int.fit_transform(int_seg)
+
+            scaler_n2d = RowMinMaxScaler()
+            n2d_scaled, _ = scaler_n2d.fit_transform(neg2d_seg)
+
+            scaler_ma = RowMinMaxScaler()
+            ma_scaled, _ = scaler_ma.fit_transform(ma_seg)
+
+            input_samples = np.concatenate([int_scaled, n2d_scaled, ma_scaled], axis=1)
+
+            # 3. Train MiniSom (5x5)
+            som = build_nm_som(
+                nm=nm,
+                input_samples=input_samples,
+                som_size=som_size,
+                verbose=verbose,
+            )
+
+            # 4. Map samples to winning node indices (BMU)
+            # Winner index (0 to 24 for a 5x5 map) stored as uint8
+            weights_flat = som.get_weights().reshape(-1, input_samples.shape[1])
+            winner_indices = np.argmin(
+                som._distance_from_weights(input_samples), axis=1
+            ).astype(np.uint8)
+
+            # Channel mapping in reference detector array [nm - 0.5, nm + 0.5)
+            ch_start = np.searchsorted(mass_axis, nm - 0.5)
+            ch_end = np.searchsorted(mass_axis, nm + 0.5)
+            channel_indices = np.arange(ch_start, ch_end)
+
+            # 5. Pack compact metadata dictionary
+            nm_meta = {
+                "channel_indices": channel_indices,
+                "int_scalers": int_scalers,  # Shape: (N_spectra, 2)
+                "winner_indices": winner_indices,  # Shape: (N_spectra,)
+                "segment_length": L,
+                "mz_bounds": (nm - 0.5, nm + 0.5),
+            }
+
+            # Optional: cache dense reconstructed intensity if explicitly requested
+            if store_dense_recon:
+                quantized_int_scaled = weights_flat[winner_indices, :L]
+                nm_meta["recon_intensity"] = RowMinMaxScaler.inverse_transform(
+                    quantized_int_scaled, int_scalers
+                )
+
+            self.nm_soms[nm] = som
+            self.nm_som_quantized[nm] = nm_meta
+
+            # Explicitly free raw arrays from memory
+            del int_seg, neg2d_seg, ma_seg, input_samples
+
+        print(
+            f"✅ SOM quantization complete. Stored {len(self.nm_soms)} models in `deployment.nm_soms`."
+        )
+        return self
+
+    def get_som_reconstructed_spectrum(self, ms_i):
+        """
+        Reconstruct a single 1D full spectrum for scan index `ms_i` on-demand
+        by stitching winning SOM prototype shapes across all nominal masses.
+        """
+        from opentof.som_helpers import RowMinMaxScaler
+        if not hasattr(self, "nm_som_quantized") or not self.nm_som_quantized:
+            raise ValueError(
+                "No quantized SOM data found. Call `populate_nm_soms_quantized()` first."
+            )
+
+        num_samples = (
+            len(self.tof_axis)
+            if self.tof_axis is not None
+            else self.tofdata.shape[-1]
+        )
+        reconstructed_spec = np.zeros(num_samples, dtype=np.float32)
+
+        for nm, meta in self.nm_som_quantized.items():
+            som = self.nm_soms[nm]
+            L = meta["segment_length"]
+            weights_flat = som.get_weights().reshape(-1, som._input_len)
+
+            # Retrieve the winning node prototype for this scan
+            win_idx = meta["winner_indices"][ms_i]
+            prototype_scaled_int = weights_flat[win_idx, :L]
+
+            # Re-scale back to original intensity units
+            row_scalers = meta["int_scalers"][ms_i : ms_i + 1, :]
+            recon_seg = RowMinMaxScaler.inverse_transform(
+                prototype_scaled_int[np.newaxis, :], row_scalers
+            ).ravel()
+
+            # Stitch into corresponding channel span
+            ch_idx = meta["channel_indices"]
+            if len(ch_idx) == len(recon_seg):
+                reconstructed_spec[ch_idx] = recon_seg
+            elif len(ch_idx) > 0:
+                # Interpolate if extrapolation slightly shifted segment lengths
+                x_old = np.linspace(0, 1, len(recon_seg))
+                x_new = np.linspace(0, 1, len(ch_idx))
+                reconstructed_spec[ch_idx] = np.interp(x_new, x_old, recon_seg)
+
+        return reconstructed_spec
+
+
+    def stitch_all_som_spectra(self, chunk_size=1000, target_h5_dataset=None):
+        """
+        Stitch reconstructed spectra across all spectra. Returns a 2D NumPy array
+        if small enough, or writes directly in chunks to an open HDF5 dataset.
+        """
+        from opentof.som_helpers import RowMinMaxScaler
+        if not hasattr(self, "nm_som_quantized") or not self.nm_som_quantized:
+            raise ValueError(
+                "No quantized SOM data found. Call `populate_nm_soms_quantized()` first."
+            )
+
+        n_spectra = len(next(iter(self.nm_som_quantized.values()))["winner_indices"])
+        num_samples = (
+            len(self.tof_axis)
+            if self.tof_axis is not None
+            else self.tofdata.shape[-1]
+        )
+
+        if target_h5_dataset is None:
+            full_stitched = np.zeros((n_spectra, num_samples), dtype=np.float32)
+
+        # Process spectra in blocks to prevent RAM pressure
+        for c_start in range(0, n_spectra, chunk_size):
+            c_end = min(c_start + chunk_size, n_spectra)
+            chunk_block = np.zeros((c_end - c_start, num_samples), dtype=np.float32)
+
+            for nm, meta in self.nm_som_quantized.items():
+                som = self.nm_soms[nm]
+                L = meta["segment_length"]
+                weights_flat = som.get_weights().reshape(-1, som._input_len)
+
+                # Slices for this spectrum chunk
+                chunk_winners = meta["winner_indices"][c_start:c_end]
+                chunk_scalers = meta["int_scalers"][c_start:c_end]
+
+                # Quantized scaled prototype intensity
+                chunk_proto_scaled = weights_flat[chunk_winners, :L]
+                chunk_recon = RowMinMaxScaler.inverse_transform(
+                    chunk_proto_scaled, chunk_scalers
+                )
+
+                ch_idx = meta["channel_indices"]
+                if len(ch_idx) == L:
+                    chunk_block[:, ch_idx] = chunk_recon
+                elif len(ch_idx) > 0:
+                    x_old = np.linspace(0, 1, L)
+                    x_new = np.linspace(0, 1, len(ch_idx))
+                    for local_i in range(chunk_block.shape[0]):
+                        chunk_block[local_i, ch_idx] = np.interp(
+                            x_new, x_old, chunk_recon[local_i]
+                        )
+
+            if target_h5_dataset is not None:
+                target_h5_dataset[c_start:c_end, :] = chunk_block
+            else:
+                full_stitched[c_start:c_end, :] = chunk_block
+
+        return full_stitched if target_h5_dataset is None else target_h5_dataset
 
     def export_to_h5(self, output_dir=None, filename=None, driver="PIF") -> Deployment:
         """
@@ -4523,6 +4989,8 @@ class Deployment:
                 f.attrs["reagent_ion"] = str(self.reagent_ion)
             if self.plot_dir is not None:
                 f.attrs["plot_dir"] = str(self.plot_dir)
+            if getattr(self, '_plot_subdir', None) is not None:
+                f.attrs["plot_subdir"] = str(self._plot_subdir)
             if self.segment_profiles is not None:
                 clean_profiles = {
                     k: (v.tolist() if isinstance(v, np.ndarray) else v)
@@ -4535,6 +5003,15 @@ class Deployment:
                 f.create_dataset("raw_peak_width_coeffs", data=np.asarray(self.raw_peak_width_coeffs, dtype="float64"))
             if getattr(self, '_corrupt_flags', None) is not None:
                 f.create_dataset("_corrupt_flags", data=np.asarray(self._corrupt_flags, dtype=bool))
+            if getattr(self, '_zero_spectra_flags', None) is not None:
+                f.create_dataset("_zero_spectra_flags", data=np.asarray(self._zero_spectra_flags, dtype=bool))
+            if getattr(self, '_quantification_flags', None) is not None:
+                q_flags = (
+                    self._quantification_flags['type']
+                    if isinstance(self._quantification_flags, dict)
+                    else self._quantification_flags
+                )
+                f.create_dataset("quantification_flags", data=np.asarray(q_flags, dtype="int32"))
 
             # Serialize empirical peak shape grid and area ratio
             if getattr(self, 'peak_shape_interp', None) is not None:
@@ -4582,6 +5059,7 @@ class Deployment:
                 "peak_list": "peak_list",
                 "nm_data": "nm_data",
                 "_cycling_status": "cycling_status",
+                "_quantification_flags": "quantification_flags",
                 "isotopes": "isotopes"
             }
 
@@ -4608,9 +5086,13 @@ class Deployment:
                     grp.create_dataset("_index", data=df.index.to_numpy())
                     for col in df.columns:
                         col_data = df[col].to_numpy()
-                        if col_data.dtype == object:
-                            col_data = col_data.astype(str)
-                        grp.create_dataset(str(col), data=col_data)
+                        if col_data.dtype.kind == 'M':
+                            ds = grp.create_dataset(str(col), data=pd.to_datetime(col_data).astype("int64"))
+                            ds.attrs["is_datetime"] = True
+                        else:
+                            if col_data.dtype == object:
+                                col_data = col_data.astype(str)
+                            grp.create_dataset(str(col), data=col_data)
 
         # --- Step 4: Write Out-of-Core Dask TOF Dataset ---
         val = getattr(self, "_tofdata", None)
@@ -5113,6 +5595,8 @@ class Deployment:
                 self.reagent_ion = str(h5.attrs["reagent_ion"])
             if "plot_dir" in h5.attrs:
                 self.plot_dir = str(h5.attrs["plot_dir"])
+            if "plot_subdir" in h5.attrs:
+                self._plot_subdir = str(h5.attrs["plot_subdir"])
             if "segment_profiles" in h5.attrs:
                 self.segment_profiles = json.loads(h5.attrs["segment_profiles"])
 
@@ -5122,6 +5606,14 @@ class Deployment:
                 self.raw_peak_width_function = np.poly1d(self.raw_peak_width_coeffs)
             if "_corrupt_flags" in h5:
                 self._corrupt_flags = h5["_corrupt_flags"][:]
+            if "_zero_spectra_flags" in h5:
+                self._zero_spectra_flags = h5["_zero_spectra_flags"][:]
+            if "quantification_flags" in h5:
+                q_node = h5["quantification_flags"]
+                if isinstance(q_node, h5py.Dataset):
+                    self._quantification_flags = q_node[:]
+                elif isinstance(q_node, h5py.Group) and "type" in q_node:
+                    self._quantification_flags = q_node["type"][:]
 
             # --- Step 3: Re-chunk Out-of-Core TOF Dataset ---
             if "tofdata" in h5:
@@ -5158,6 +5650,7 @@ class Deployment:
                 "peak_list": "peak_list",
                 "nm_data": "nm_data",
                 "cycling_status": "_cycling_status",
+                "quantification_flags": "_quantification_flags",
                 "isotopes": "isotopes"
             }
             for h5_path, attr_name in dict_restore_mappings.items():
@@ -5172,10 +5665,26 @@ class Deployment:
                 avg_idx = avg_grp["interval_indices"][:]
                 self._averaged_dataset = (avg_data, avg_ts, avg_idx)
 
-            # Reconstruct baseline-subtracted TOF array via 2D broadcasting
-            if self.baseline and "adjusted_baseline" in self.baseline and self._tofdata is not None:
-                adj_bsl = np.array(self.baseline["adjusted_baseline"])
-                self.tofdata_subtracted = self._tofdata - adj_bsl.reshape(1, -1)
+            # Reconstruct baseline-subtracted TOF array
+            if self.baseline and self._tofdata is not None:
+                from opentof.mass_calibration import _subtract_baseline_surface_worker
+                if (self.baseline.get("mode") == "surface" and 
+                    "sampled_baselines" in self.baseline and 
+                    "sampled_indices" in self.baseline):
+                    
+                    s_indices = np.asarray(self.baseline["sampled_indices"])
+                    s_baselines = np.asarray(self.baseline["sampled_baselines"])
+                    
+                    if hasattr(self._tofdata, 'map_blocks'):
+                        self.tofdata_subtracted = self._tofdata.map_blocks(
+                            _subtract_baseline_surface_worker,
+                            sample_indices=s_indices,
+                            sampled_baselines=s_baselines,
+                            dtype=self._tofdata.dtype
+                        )
+                elif "adjusted_baseline" in self.baseline:
+                    adj_bsl = np.array(self.baseline["adjusted_baseline"])
+                    self.tofdata_subtracted = self._tofdata - adj_bsl.reshape(1, -1)
 
             # Re-bind custom peak shape function if interpolator grid is present
             if self.calibration and self.baseline and "batch_params" in self.calibration:
@@ -5203,7 +5712,14 @@ class Deployment:
             for df_attr in ["peak_data", "time_series"]:
                 if df_attr in h5:
                     grp = h5[df_attr]
-                    df_dict = {col: grp[col][:] for col in grp.keys() if col != "_index"}
+                    df_dict = {}
+                    for col in grp.keys():
+                        if col == "_index":
+                            continue
+                        col_arr = grp[col][:]
+                        if grp[col].attrs.get("is_datetime", False):
+                            col_arr = col_arr.astype("datetime64[ns]")
+                        df_dict[col] = col_arr
                     restored_df = pd.DataFrame(df_dict, index=grp["_index"][:])
                     setattr(self, df_attr, restored_df)
             
@@ -5328,7 +5844,7 @@ class Deployment:
             combined_df = pd.concat(all_peak_data_frames, ignore_index=True)
             combined_df = combined_df.sort_values('time').reset_index(drop=True)
             combined_df['MS_index'] = combined_df.index
-            self.peak_data = combined_df
+            self.peak_data = self._sync_peak_data_metadata(combined_df)
             print(" -> Successfully imported and merged PeakData arrays.")
             
         print("Processed (_p) files imported successfully.")
@@ -5499,7 +6015,7 @@ class Deployment:
         ----------
         output_filepath : str or pathlib.Path or None, default=None
             Target file path for the exported `.txt` file. Defaults to ``"tofware_peak_list.txt"`` 
-            inside `self.plot_dir` / `default_plot_subdir` if ``None``.
+            inside `self.plot_dir` / `plot_subdir` if ``None``.
 
         Returns
         -------
@@ -5588,7 +6104,7 @@ class Deployment:
         # Resolve output text file path
         if output_filepath is None:
             base_dir = self.plot_dir if getattr(self, 'plot_dir', None) is not None else get_default_plot_dir()
-            out_path = Path(base_dir) / self.default_plot_subdir / "tofware_peak_list.txt"
+            out_path = Path(base_dir) / self.plot_subdir / "tofware_peak_list.txt"
         else:
             out_path = Path(output_filepath)
 
